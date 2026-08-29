@@ -13,7 +13,7 @@ load_dotenv()
 # ================================================================
 #                        CONFIGURATION
 # ================================================================
-TOKEN = ("DISCORD_TOKEN")
+TOKEN = os.getenv("DISCORD_TOKEN")
 PREFIX = "+"
 
 STAFF_ROLE_NAME = "Staff"               # Nom exact du rôle staff sur ton serveur
