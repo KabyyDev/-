@@ -13,7 +13,6 @@ load_dotenv()
 # ================================================================
 #                        CONFIGURATION
 # ================================================================
-TOKEN = os.getenv("DISCORD_TOKEN")
 PREFIX = "+"
 
 STAFF_ROLE_NAME = "Staff"               # Nom exact du rôle staff sur ton serveur
@@ -1077,5 +1076,6 @@ async def on_ready():
 if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError("Défini la variable d'environnement DISCORD_TOKEN avant de lancer le bot.")
+     TOKEN = os.getenv("DISCORD_TOKEN")
     bot.run(TOKEN)
  
