@@ -1072,10 +1072,8 @@ async def on_ready():
  
     print(f"✅ Connecté en tant que {bot.user}")
  
- 
 if __name__ == "__main__":
+    TOKEN = os.getenv("DISCORD_TOKEN")
     if not TOKEN:
         raise RuntimeError("Défini la variable d'environnement DISCORD_TOKEN avant de lancer le bot.")
-     TOKEN = os.getenv("DISCORD_TOKEN")
     bot.run(TOKEN)
- 
