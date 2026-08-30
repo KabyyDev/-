@@ -3,6 +3,7 @@ import os
 import re
 import json
 import uuid
+import random
 import calendar
 import asyncio
 import aiohttp
@@ -23,7 +24,7 @@ STAFF_ROLE_NAME = "Ping staff"          # Nom exact du rôle staff sur ton serve
 STATS_CATEGORY_NAME = "🧽 SERVEUR STATS"
 STATS_UPDATE_INTERVAL_MINUTES = 10      # Discord limite les renommages de salons (~2 / 10 min)
 CONFIG_FILE = "config.json"             # Stockage persistant des rôles autorisés à valider
-DEV_GUILD_ID = 1537139988448153640      # ID de ton serveur, pour une synchro instantanée des slash commands
+DEV_GUILD_ID = 1539254757951021147      # ID de ton serveur, pour une synchro instantanée des slash commands
  
 # ---- Élu de la semaine ----
 ELU_ROLE_NAME = "👑 Élu de la semaine"
@@ -89,6 +90,10 @@ NORMAL_COMMANDS = [
     ("+cmds", "Affiche la liste des commandes disponibles."),
     ("+invite-stats", "Affiche combien de membres tu as invités sur le serveur."),
     ("+concept list", "Affiche la liste des notés du Concept."),
+    ("/animal collection", "Affiche les animaux que tu as capturés."),
+    ("/animal classement", "Affiche le classement des meilleurs chasseurs d'animaux."),
+    ("/pet inventory", "Affiche ton inventaire d'animaux capturés."),
+    ("/pet trade [@membre]", "Propose un échange d'animal avec un autre membre."),
 ]
  
 STAFF_COMMANDS = [
@@ -96,6 +101,8 @@ STAFF_COMMANDS = [
     ("+role-react setup", "Crée un message à réactions qui donne des rôles."),
     ("/ticketsetup", "Crée un panneau de tickets personnalisable (staff)."),
     ("/set updatelogs [salon]", "Définit le salon des nouveautés du bot et y publie le changelog (staff)."),
+    ("/animal config [salon]", "Active le système d'animaux à capturer dans ce salon (staff)."),
+    ("/animal forcespawn", "Force l'apparition immédiate d'un animal (staff)."),
     ("+concept note @membre", "Notez une personne dans la listes des concepts."),
     ("+concept list reset", "Réinitialise la liste Concept."),
     ("/eludelasemaine", "Affiche les règles de l'Élu de la semaine (staff)."),
@@ -1149,6 +1156,603 @@ bot.tree.add_command(config_group)
  
  
 # ================================================================
+#      SYSTÈME D'ANIMAUX À CAPTURER (optionnel, /animal config)
+# ================================================================
+#
+# Chaque jour, à une heure aléatoire, un animal sauvage apparaît dans le
+# salon configuré. Le premier membre à cliquer sur "Capturer !" le remporte.
+# La rareté de l'animal qui apparaît est tirée au sort selon les pourcentages
+# ci-dessous, puis un animal est choisi au hasard parmi ceux de cette rareté.
+ 
+ANIMAUX = [
+    {"nom": "Yuzenn", "rarete": "Owner"},
+    {"nom": "Snow", "rarete": "Owner"},
+    {"nom": "Rebeu", "rarete": "Co-Owner"},
+    {"nom": "Cafard", "rarete": "Modérateur"},
+    {"nom": "R0tten", "rarete": "VIP"},
+    {"nom": "Lgz", "rarete": "VIP"},
+    {"nom": "9z_wl", "rarete": "Membre"},
+    {"nom": "Beurre2KKhouette", "rarete": "Membre"},
+    {"nom": "Slayzxx", "rarete": "Membre"},
+]
+ 
+RARETE_WEIGHTS = {
+    "Owner": 0.5,
+    "Co-Owner": 2,
+    "Modérateur": 10,
+    "VIP": 28,
+    "Membre": 59.5,
+}
+ 
+RARETE_COLORS = {
+    "Owner": discord.Color.red(),
+    "Co-Owner": discord.Color.orange(),
+    "Modérateur": discord.Color.purple(),
+    "VIP": discord.Color.gold(),
+    "Membre": discord.Color.light_grey(),
+}
+ 
+ANIMAL_SPAWN_HOUR_MIN = 8       # Heure la plus tôt possible pour un spawn (heure de Paris)
+ANIMAL_SPAWN_HOUR_MAX = 23      # Heure la plus tardive possible pour un spawn
+ANIMAL_DESPAWN_SECONDS = 300    # Temps disponible pour capturer l'animal (5 minutes) avant qu'il ne s'enfuie
+ANIMAL_CHECK_INTERVAL_MINUTES = 1
+ 
+ 
+def pick_random_animal() -> dict:
+    """Tire une rareté selon les pourcentages configurés, puis un animal
+    au hasard parmi ceux de cette rareté."""
+    raretes = list(RARETE_WEIGHTS.keys())
+    poids = list(RARETE_WEIGHTS.values())
+    rarete_choisie = random.choices(raretes, weights=poids, k=1)[0]
+    candidats = [a for a in ANIMAUX if a["rarete"] == rarete_choisie]
+    return random.choice(candidats)
+ 
+ 
+def compute_next_spawn_datetime(base: datetime) -> datetime:
+    """Calcule une heure aléatoire du jour suivant `base`, entre
+    ANIMAL_SPAWN_HOUR_MIN et ANIMAL_SPAWN_HOUR_MAX (heure de Paris)."""
+    heure = random.randint(ANIMAL_SPAWN_HOUR_MIN, ANIMAL_SPAWN_HOUR_MAX)
+    minute = random.randint(0, 59)
+    prochain_jour = base + timedelta(days=1)
+    return prochain_jour.replace(hour=heure, minute=minute, second=0, microsecond=0)
+ 
+ 
+def build_animal_spawn_embed(animal: dict) -> discord.Embed:
+    color = RARETE_COLORS.get(animal["rarete"], discord.Color.blurple())
+    embed = discord.Embed(
+        title="🐾 Un animal sauvage est apparu !",
+        description=f"Un **{animal['nom']}** rôde dans les parages...\nSois le premier à cliquer pour le capturer !",
+        color=color,
+    )
+    embed.add_field(name="🐾 Espèce", value=animal["rarete"], inline=True)
+    embed.add_field(name="⭐ Rareté", value=animal["rarete"], inline=True)
+    embed.set_footer(text="Ce compagnon sauvage attend un maître...")
+    return embed
+ 
+ 
+def build_animal_captured_embed(animal: dict, user: discord.abc.User) -> discord.Embed:
+    color = RARETE_COLORS.get(animal["rarete"], discord.Color.green())
+    embed = discord.Embed(
+        title=f"{animal['nom']} — Capturé !",
+        description=f"{user.mention} a capturé **{animal['nom']}** !",
+        color=color,
+    )
+    embed.add_field(name="🐾 Espèce", value=animal["rarete"], inline=True)
+    embed.add_field(name="⭐ Rareté", value=animal["rarete"], inline=True)
+    date_str = datetime.now(PARIS_TZ).strftime("%d/%m/%Y %H:%M")
+    embed.set_footer(text=f"Ce compagnon a trouvé un maître. • {date_str}")
+    return embed
+ 
+ 
+def build_animal_escaped_embed(animal: dict) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"{animal['nom']} — Enfui !",
+        description=f"Personne n'a capturé **{animal['nom']}** à temps... il s'est enfui. 😢",
+        color=discord.Color.dark_grey(),
+    )
+    embed.add_field(name="🐾 Espèce", value=animal["rarete"], inline=True)
+    embed.add_field(name="⭐ Rareté", value=animal["rarete"], inline=True)
+    return embed
+ 
+ 
+class AnimalCaptureView(discord.ui.View):
+    """Vue temporaire (non persistante) affichée sous un animal sauvage.
+    Le premier clic sur le bouton remporte l'animal."""
+ 
+    def __init__(self, animal: dict, guild_id: int):
+        super().__init__(timeout=ANIMAL_DESPAWN_SECONDS)
+        self.animal = animal
+        self.guild_id = guild_id
+        self.captured = False
+        self.message: discord.Message | None = None
+ 
+    @discord.ui.button(label="🎯 Capturer !", style=discord.ButtonStyle.primary)
+    async def capturer(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.captured:
+            await interaction.response.send_message(
+                "😢 Trop tard, quelqu'un d'autre l'a déjà capturé !", ephemeral=True
+            )
+            return
+ 
+        # Verrouillage immédiat (avant tout await) pour éviter qu'un double-clic
+        # simultané ne fasse gagner l'animal à deux personnes à la fois.
+        self.captured = True
+ 
+        guild_conf = config.setdefault(str(self.guild_id), {})
+        collections = guild_conf.setdefault("animal_collections", {})
+        user_animaux = collections.setdefault(str(interaction.user.id), [])
+        user_animaux.append(self.animal["nom"])
+        save_config(config)
+ 
+        embed = build_animal_captured_embed(self.animal, interaction.user)
+        button.style = discord.ButtonStyle.success
+        button.label = "✅ Capturé !"
+        button.disabled = True
+        self.stop()
+        await interaction.response.edit_message(embed=embed, view=self)
+ 
+    async def on_timeout(self):
+        if self.captured or self.message is None:
+            return
+        embed = build_animal_escaped_embed(self.animal)
+        for child in self.children:
+            child.disabled = True
+        try:
+            await self.message.edit(embed=embed, view=self)
+        except discord.HTTPException:
+            pass
+ 
+ 
+async def spawn_animal(guild: discord.Guild, channel: discord.abc.Messageable) -> None:
+    animal = pick_random_animal()
+    embed = build_animal_spawn_embed(animal)
+    view = AnimalCaptureView(animal, guild.id)
+    message = await channel.send(embed=embed, view=view)
+    view.message = message
+ 
+ 
+@tasks.loop(minutes=ANIMAL_CHECK_INTERVAL_MINUTES)
+async def check_animal_spawns():
+    now = datetime.now(PARIS_TZ)
+    for guild in bot.guilds:
+        guild_conf = config.get(str(guild.id), {})
+        animal_conf = guild_conf.get("animal_config")
+        if not animal_conf or not animal_conf.get("channel_id"):
+            continue
+ 
+        next_spawn_iso = animal_conf.get("next_spawn")
+        if not next_spawn_iso:
+            # Pas encore de spawn programmé : on en programme un premier
+            # (dès aujourd'hui, à une heure aléatoire restante).
+            next_dt = compute_next_spawn_datetime(now - timedelta(days=1))
+            animal_conf["next_spawn"] = next_dt.isoformat()
+            save_config(config)
+            continue
+ 
+        next_dt = datetime.fromisoformat(next_spawn_iso)
+        if next_dt.tzinfo is None:
+            next_dt = next_dt.replace(tzinfo=PARIS_TZ)
+ 
+        if now >= next_dt:
+            channel = guild.get_channel(animal_conf["channel_id"])
+            if channel:
+                try:
+                    await spawn_animal(guild, channel)
+                except discord.HTTPException:
+                    pass
+            animal_conf["next_spawn"] = compute_next_spawn_datetime(now).isoformat()
+            save_config(config)
+ 
+ 
+@check_animal_spawns.before_loop
+async def before_check_animal_spawns():
+    await bot.wait_until_ready()
+ 
+ 
+animal_group = app_commands.Group(name="animal", description="Système d'animaux à capturer")
+ 
+ 
+@animal_group.command(name="config", description="[Staff] Active/configure le système d'animaux à capturer")
+@app_commands.describe(salon="Salon où les animaux sauvages apparaîtront")
+async def animal_config_cmd(interaction: discord.Interaction, salon: discord.TextChannel):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message(
+            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+ 
+    guild_conf = config.setdefault(str(interaction.guild.id), {})
+    animal_conf = guild_conf.setdefault("animal_config", {})
+    animal_conf["channel_id"] = salon.id
+    if "next_spawn" not in animal_conf:
+        premiere_prog = compute_next_spawn_datetime(datetime.now(PARIS_TZ) - timedelta(days=1))
+        animal_conf["next_spawn"] = premiere_prog.isoformat()
+    save_config(config)
+ 
+    await interaction.response.send_message(
+        f"✅ Système d'animaux activé ! Un animal apparaîtra chaque jour à une heure aléatoire "
+        f"(entre {ANIMAL_SPAWN_HOUR_MIN}h et {ANIMAL_SPAWN_HOUR_MAX}h) dans {salon.mention}.",
+        ephemeral=True,
+    )
+ 
+ 
+@animal_group.command(name="desactiver", description="[Staff] Désactive le système d'animaux")
+async def animal_desactiver_cmd(interaction: discord.Interaction):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message(
+            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+ 
+    guild_conf = config.setdefault(str(interaction.guild.id), {})
+    if "animal_config" in guild_conf:
+        del guild_conf["animal_config"]
+        save_config(config)
+ 
+    await interaction.response.send_message("✅ Système d'animaux désactivé sur ce serveur.", ephemeral=True)
+ 
+ 
+@animal_group.command(name="forcespawn", description="[Staff] Force l'apparition immédiate d'un animal")
+async def animal_forcespawn_cmd(interaction: discord.Interaction):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message(
+            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+ 
+    guild_conf = config.get(str(interaction.guild.id), {})
+    animal_conf = guild_conf.get("animal_config")
+    if not animal_conf or not animal_conf.get("channel_id"):
+        await interaction.response.send_message(
+            "❌ Le système d'animaux n'est pas configuré. Utilise `/animal config` d'abord.", ephemeral=True
+        )
+        return
+ 
+    channel = interaction.guild.get_channel(animal_conf["channel_id"])
+    if channel is None:
+        await interaction.response.send_message("❌ Le salon configuré est introuvable.", ephemeral=True)
+        return
+ 
+    await interaction.response.send_message(f"✅ Un animal va apparaître dans {channel.mention} !", ephemeral=True)
+    await spawn_animal(interaction.guild, channel)
+ 
+ 
+@animal_group.command(name="collection", description="Affiche les animaux que tu as capturés")
+async def animal_collection_cmd(interaction: discord.Interaction):
+    guild_conf = config.get(str(interaction.guild.id), {})
+    collections = guild_conf.get("animal_collections", {})
+    mes_animaux = collections.get(str(interaction.user.id), [])
+ 
+    if not mes_animaux:
+        await interaction.response.send_message("Tu n'as encore capturé aucun animal.", ephemeral=True)
+        return
+ 
+    compteur: dict[str, int] = {}
+    for nom in mes_animaux:
+        compteur[nom] = compteur.get(nom, 0) + 1
+ 
+    lignes = []
+    for nom, count in sorted(compteur.items(), key=lambda x: -x[1]):
+        rarete = next((a["rarete"] for a in ANIMAUX if a["nom"] == nom), "?")
+        lignes.append(f"**{nom}** ({rarete}) x{count}")
+ 
+    embed = discord.Embed(
+        title=f"🐾 Collection de {interaction.user.display_name}",
+        description="\n".join(lignes),
+        color=discord.Color.blurple(),
+    )
+    embed.set_footer(text=f"{len(mes_animaux)} capture(s) au total")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+ 
+ 
+@animal_group.command(name="classement", description="Affiche le classement des meilleurs chasseurs d'animaux")
+async def animal_classement_cmd(interaction: discord.Interaction):
+    guild_conf = config.get(str(interaction.guild.id), {})
+    collections = guild_conf.get("animal_collections", {})
+ 
+    if not collections:
+        await interaction.response.send_message("Personne n'a encore capturé d'animal sur ce serveur.", ephemeral=True)
+        return
+ 
+    classement = sorted(collections.items(), key=lambda x: -len(x[1]))[:10]
+    lignes = []
+    for i, (uid, animaux) in enumerate(classement, start=1):
+        member = interaction.guild.get_member(int(uid))
+        nom = member.mention if member else f"<@{uid}>"
+        lignes.append(f"**#{i}** — {nom} : {len(animaux)} capture(s)")
+ 
+    embed = discord.Embed(
+        title="🏆 Classement des chasseurs d'animaux",
+        description="\n".join(lignes),
+        color=discord.Color.gold(),
+    )
+    await interaction.response.send_message(embed=embed)
+ 
+ 
+bot.tree.add_command(animal_group)
+ 
+ 
+# ================================================================
+#      INVENTAIRE ET ÉCHANGES D'ANIMAUX (/pet inventory, /pet trade)
+# ================================================================
+#
+# /pet trade propose un échange 1 contre 1 : l'initiateur choisit un de ses
+# animaux à donner et un animal que la cible possède déjà à recevoir. La
+# cible doit ensuite cliquer sur "Accepter" pour que l'échange soit effectué.
+ 
+def get_animal_counts(guild_id: int, user_id: int) -> dict:
+    """Retourne {nom_animal: quantité} pour un membre donné."""
+    guild_conf = config.get(str(guild_id), {})
+    animaux_liste = guild_conf.get("animal_collections", {}).get(str(user_id), [])
+    compteur: dict[str, int] = {}
+    for nom in animaux_liste:
+        compteur[nom] = compteur.get(nom, 0) + 1
+    return compteur
+ 
+ 
+def get_animal_rarete(nom: str) -> str:
+    return next((a["rarete"] for a in ANIMAUX if a["nom"] == nom), "?")
+ 
+ 
+class PetTradeConfirmView(discord.ui.View):
+    """Vue affichée dans le salon, visible par la cible de l'échange, qui doit
+    accepter ou refuser."""
+ 
+    def __init__(self, initiateur: discord.Member, cible: discord.Member, animal_initiateur: str, animal_cible: str):
+        super().__init__(timeout=300)
+        self.initiateur = initiateur
+        self.cible = cible
+        self.animal_initiateur = animal_initiateur
+        self.animal_cible = animal_cible
+        self.resolved = False
+        self.message: discord.Message | None = None
+ 
+    @discord.ui.button(label="✅ Accepter", style=discord.ButtonStyle.success)
+    async def accepter(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.cible.id:
+            await interaction.response.send_message(
+                "❌ Seul(e) la personne visée par cet échange peut y répondre.", ephemeral=True
+            )
+            return
+        if self.resolved:
+            return
+        self.resolved = True
+ 
+        guild_conf = config.setdefault(str(interaction.guild.id), {})
+        collections = guild_conf.setdefault("animal_collections", {})
+        animaux_initiateur = collections.setdefault(str(self.initiateur.id), [])
+        animaux_cible = collections.setdefault(str(self.cible.id), [])
+ 
+        if self.animal_initiateur not in animaux_initiateur or self.animal_cible not in animaux_cible:
+            self.stop()
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(
+                content="❌ L'un des deux animaux n'est plus disponible (déjà échangé ?). Échange annulé.",
+                embed=None,
+                view=self,
+            )
+            return
+ 
+        animaux_initiateur.remove(self.animal_initiateur)
+        animaux_initiateur.append(self.animal_cible)
+        animaux_cible.remove(self.animal_cible)
+        animaux_cible.append(self.animal_initiateur)
+        save_config(config)
+ 
+        self.stop()
+        for child in self.children:
+            child.disabled = True
+ 
+        embed = discord.Embed(
+            title="✅ Échange effectué !",
+            description=(
+                f"{self.initiateur.mention} a donné **{self.animal_initiateur}** et reçu **{self.animal_cible}**.\n"
+                f"{self.cible.mention} a donné **{self.animal_cible}** et reçu **{self.animal_initiateur}**."
+            ),
+            color=discord.Color.green(),
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=self)
+ 
+    @discord.ui.button(label="❌ Refuser", style=discord.ButtonStyle.danger)
+    async def refuser(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.cible.id:
+            await interaction.response.send_message(
+                "❌ Seul(e) la personne visée par cet échange peut y répondre.", ephemeral=True
+            )
+            return
+        if self.resolved:
+            return
+        self.resolved = True
+        self.stop()
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content=f"❌ {self.cible.mention} a refusé l'échange.", embed=None, view=self
+        )
+ 
+    async def on_timeout(self):
+        if self.resolved or self.message is None:
+            return
+        for child in self.children:
+            child.disabled = True
+        try:
+            await self.message.edit(content="⏱️ Cet échange a expiré (personne n'a répondu à temps).", embed=None, view=self)
+        except discord.HTTPException:
+            pass
+ 
+ 
+class PetTradeSetupView(discord.ui.View):
+    """Vue éphémère (visible seulement par l'initiateur) pour choisir les deux
+    animaux concernés avant d'envoyer la proposition."""
+ 
+    def __init__(self, initiateur: discord.Member, cible: discord.Member, mes_animaux: list, leurs_animaux: list):
+        super().__init__(timeout=120)
+        self.initiateur = initiateur
+        self.cible = cible
+        self.mon_choix: str | None = None
+        self.leur_choix: str | None = None
+ 
+        self.select_mon_animal = discord.ui.Select(
+            placeholder="Ton animal à proposer",
+            options=self._build_options(mes_animaux),
+            min_values=1,
+            max_values=1,
+        )
+        self.select_mon_animal.callback = self.on_select_mon_animal
+        self.add_item(self.select_mon_animal)
+ 
+        self.select_leur_animal = discord.ui.Select(
+            placeholder=f"Animal de {cible.display_name} à recevoir",
+            options=self._build_options(leurs_animaux),
+            min_values=1,
+            max_values=1,
+        )
+        self.select_leur_animal.callback = self.on_select_leur_animal
+        self.add_item(self.select_leur_animal)
+ 
+        self.bouton_proposer = discord.ui.Button(
+            label="Proposer l'échange", style=discord.ButtonStyle.primary, disabled=True
+        )
+        self.bouton_proposer.callback = self.on_proposer
+        self.add_item(self.bouton_proposer)
+ 
+    @staticmethod
+    def _build_options(animaux_liste: list) -> list:
+        uniques = sorted(set(animaux_liste))
+        options = []
+        for nom in uniques[:25]:
+            rarete = get_animal_rarete(nom)
+            count = animaux_liste.count(nom)
+            options.append(discord.SelectOption(label=nom, description=f"{rarete} • x{count}", value=nom))
+        return options
+ 
+    def _maj_bouton(self):
+        self.bouton_proposer.disabled = not (self.mon_choix and self.leur_choix)
+ 
+    async def on_select_mon_animal(self, interaction: discord.Interaction):
+        if interaction.user.id != self.initiateur.id:
+            await interaction.response.send_message("❌ Ce n'est pas ton échange.", ephemeral=True)
+            return
+        self.mon_choix = self.select_mon_animal.values[0]
+        self._maj_bouton()
+        await interaction.response.edit_message(view=self)
+ 
+    async def on_select_leur_animal(self, interaction: discord.Interaction):
+        if interaction.user.id != self.initiateur.id:
+            await interaction.response.send_message("❌ Ce n'est pas ton échange.", ephemeral=True)
+            return
+        self.leur_choix = self.select_leur_animal.values[0]
+        self._maj_bouton()
+        await interaction.response.edit_message(view=self)
+ 
+    async def on_proposer(self, interaction: discord.Interaction):
+        if interaction.user.id != self.initiateur.id:
+            await interaction.response.send_message("❌ Ce n'est pas ton échange.", ephemeral=True)
+            return
+ 
+        guild_conf = config.get(str(interaction.guild.id), {})
+        collections = guild_conf.get("animal_collections", {})
+        mes_animaux_actuels = collections.get(str(self.initiateur.id), [])
+        leurs_animaux_actuels = collections.get(str(self.cible.id), [])
+ 
+        if self.mon_choix not in mes_animaux_actuels:
+            self.stop()
+            await interaction.response.edit_message(
+                content=f"❌ Tu ne possèdes plus **{self.mon_choix}**. Échange annulé.", view=None
+            )
+            return
+        if self.leur_choix not in leurs_animaux_actuels:
+            self.stop()
+            await interaction.response.edit_message(
+                content=f"❌ {self.cible.mention} ne possède plus **{self.leur_choix}**. Échange annulé.", view=None
+            )
+            return
+ 
+        self.stop()
+        await interaction.response.edit_message(content=f"✅ Proposition envoyée à {self.cible.mention} !", view=None)
+ 
+        rarete_mon = get_animal_rarete(self.mon_choix)
+        rarete_leur = get_animal_rarete(self.leur_choix)
+        embed = discord.Embed(
+            title="🔄 Proposition d'échange",
+            description=(
+                f"{self.initiateur.mention} propose un échange à {self.cible.mention} :\n\n"
+                f"**{self.initiateur.display_name}** donne : **{self.mon_choix}** ({rarete_mon})\n"
+                f"**{self.cible.display_name}** donne : **{self.leur_choix}** ({rarete_leur})"
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text=f"{self.cible.display_name}, clique ci-dessous pour répondre (5 min).")
+ 
+        confirm_view = PetTradeConfirmView(self.initiateur, self.cible, self.mon_choix, self.leur_choix)
+        message = await interaction.channel.send(content=self.cible.mention, embed=embed, view=confirm_view)
+        confirm_view.message = message
+ 
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+ 
+ 
+pet_group = app_commands.Group(name="pet", description="Gère tes animaux capturés")
+ 
+ 
+@pet_group.command(name="inventory", description="Affiche les animaux que tu as capturés")
+async def pet_inventory_cmd(interaction: discord.Interaction):
+    compteur = get_animal_counts(interaction.guild.id, interaction.user.id)
+ 
+    if not compteur:
+        await interaction.response.send_message("Tu n'as encore capturé aucun animal.", ephemeral=True)
+        return
+ 
+    lignes = []
+    for nom, count in sorted(compteur.items(), key=lambda x: -x[1]):
+        rarete = get_animal_rarete(nom)
+        lignes.append(f"**{nom}** ({rarete}) x{count}")
+ 
+    embed = discord.Embed(
+        title=f"🐾 Inventaire de {interaction.user.display_name}",
+        description="\n".join(lignes),
+        color=discord.Color.blurple(),
+    )
+    embed.set_footer(text=f"{sum(compteur.values())} capture(s) au total")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+ 
+ 
+@pet_group.command(name="trade", description="Propose un échange d'animal avec un autre membre")
+@app_commands.describe(membre="Le membre avec qui échanger un animal")
+async def pet_trade_cmd(interaction: discord.Interaction, membre: discord.Member):
+    if membre.id == interaction.user.id:
+        await interaction.response.send_message("❌ Tu ne peux pas échanger avec toi-même.", ephemeral=True)
+        return
+    if membre.bot:
+        await interaction.response.send_message("❌ Tu ne peux pas échanger avec un bot.", ephemeral=True)
+        return
+ 
+    guild_conf = config.get(str(interaction.guild.id), {})
+    collections = guild_conf.get("animal_collections", {})
+    mes_animaux = collections.get(str(interaction.user.id), [])
+    leurs_animaux = collections.get(str(membre.id), [])
+ 
+    if not mes_animaux:
+        await interaction.response.send_message("❌ Tu n'as aucun animal à échanger.", ephemeral=True)
+        return
+    if not leurs_animaux:
+        await interaction.response.send_message(f"❌ {membre.mention} n'a aucun animal à échanger.", ephemeral=True)
+        return
+ 
+    view = PetTradeSetupView(interaction.user, membre, mes_animaux, leurs_animaux)
+    await interaction.response.send_message(
+        f"🔄 Configure ton échange avec {membre.mention} : choisis l'animal que tu proposes et celui que tu veux recevoir.",
+        view=view,
+        ephemeral=True,
+    )
+ 
+ 
+bot.tree.add_command(pet_group)
+ 
+ 
+# ================================================================
 #                      +stats serveur
 # ================================================================
  
@@ -1258,6 +1862,27 @@ UPDATE_LOGS = [
             "Chaque dimanche à 00h30 (heure de Paris), le membre ayant envoyé le plus de messages "
             "dans la semaine reçoit automatiquement le rôle **👑 Élu de la semaine** pendant 7 jours.\n"
             "Commandes : `/eludelasemaine` (affiche les règles) et `/forcerelu` (force la sélection, staff)."
+        ),
+    },
+    {
+        "titre": "🎂 Système d'anniversaires",
+        "description": (
+            "Système optionnel : `/anniv config` (staff) active les annonces d'anniversaire dans un salon.\n"
+            "Les membres enregistrent leur date avec `/anniversaire create` (jour/mois uniquement, sans année)."
+        ),
+    },
+    {
+        "titre": "📱 Notifications TikTok",
+        "description": (
+            "`/config tiktok` (staff) permet de recevoir une notification à chaque nouvelle vidéo "
+            "du compte TikTok suivi."
+        ),
+    },
+    {
+        "titre": "🐾 Animaux à capturer",
+        "description": (
+            "Système optionnel : `/animal config` (staff) fait apparaître un animal sauvage par jour, "
+            "à une heure aléatoire. Premier arrivé, premier servi ! Voir sa collection avec `/animal collection`."
         ),
     },
 ]
@@ -2012,6 +2637,9 @@ async def on_ready():
  
     if not check_tiktok_loop.is_running():
         check_tiktok_loop.start()
+ 
+    if not check_animal_spawns.is_running():
+        check_animal_spawns.start()
  
     print(f"✅ Connecté en tant que {bot.user}")
  
