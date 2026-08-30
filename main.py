@@ -1,11 +1,13 @@
 
 import os
+import re
 import json
 import uuid
+import calendar
 import asyncio
 import aiohttp
 import discord
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dt_time
 from zoneinfo import ZoneInfo
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -30,6 +32,10 @@ PARIS_TZ = ZoneInfo("Europe/Paris")
  
 # ---- Tickets ----
 TICKETS_CATEGORY_NAME = "🎫 TICKETS"     # Catégorie par défaut où sont créés les salons de tickets
+ 
+# ---- TikTok ----
+TIKTOK_USERNAME = "7vkp2"                # Compte TikTok suivi (https://www.tiktok.com/@7vkp2)
+TIKTOK_CHECK_INTERVAL_MINUTES = 10       # Fréquence de vérification des nouvelles vidéos
 # ================================================================
  
 intents = discord.Intents.default()
@@ -732,6 +738,414 @@ async def ticketsetup(interaction: discord.Interaction):
         )
         return
     await interaction.response.send_modal(TicketSetupModal())
+ 
+ 
+# ================================================================
+#          SYSTÈME D'ANNIVERSAIRES (optionnel, /anniv config)
+# ================================================================
+#
+# Le système est désactivé par défaut sur un serveur : il faut que le staff
+# fasse /anniv config pour choisir le salon d'annonce (et éventuellement
+# personnaliser le message). Une fois configuré, les membres peuvent utiliser
+# /anniversaire create pour enregistrer leur date (jour + mois uniquement,
+# jamais l'année — donc pas de date de naissance ni de calcul d'âge).
+# Chaque membre ne peut enregistrer qu'un seul anniversaire (utiliser
+# /anniversaire modifier pour le changer).
+ 
+ANNIV_CHECK_TIME = dt_time(hour=9, minute=0, tzinfo=PARIS_TZ)  # Heure de vérification quotidienne
+ANNIV_DEFAULT_MESSAGE = "🎉🎂 Joyeux anniversaire {membre} !"
+ 
+ 
+def is_anniv_enabled(guild_id: int) -> bool:
+    return bool(config.get(str(guild_id), {}).get("anniv_config", {}).get("channel_id"))
+ 
+ 
+def parse_anniv_date(date_str: str):
+    """Parse une date au format JJ/MM (l'année, si fournie, est ignorée).
+    Retourne (jour, mois) ou None si invalide."""
+    parts = [p for p in re.split(r"[\/\-\. ]+", date_str.strip()) if p]
+    if len(parts) < 2:
+        return None
+    try:
+        jour = int(parts[0])
+        mois = int(parts[1])
+    except ValueError:
+        return None
+ 
+    if not (1 <= mois <= 12):
+        return None
+    # 2024 est bissextile : autorise le 29 février dans tous les cas.
+    max_jour = calendar.monthrange(2024, mois)[1]
+    if not (1 <= jour <= max_jour):
+        return None
+ 
+    return jour, mois
+ 
+ 
+@tasks.loop(time=ANNIV_CHECK_TIME)
+async def check_anniversaires():
+    now = datetime.now(PARIS_TZ)
+    for guild in bot.guilds:
+        guild_conf = config.get(str(guild.id), {})
+        anniv_conf = guild_conf.get("anniv_config")
+        if not anniv_conf or not anniv_conf.get("channel_id"):
+            continue
+ 
+        channel = guild.get_channel(anniv_conf["channel_id"])
+        if channel is None:
+            continue
+ 
+        message_template = anniv_conf.get("message") or ANNIV_DEFAULT_MESSAGE
+        birthdays = guild_conf.get("birthdays", {})
+ 
+        for user_id, bday in birthdays.items():
+            if bday.get("day") == now.day and bday.get("month") == now.month:
+                member = guild.get_member(int(user_id))
+                if member is None:
+                    continue
+                texte = message_template.replace("{membre}", member.mention)
+                try:
+                    await channel.send(texte)
+                except discord.HTTPException:
+                    pass
+ 
+ 
+@check_anniversaires.before_loop
+async def before_check_anniversaires():
+    await bot.wait_until_ready()
+ 
+ 
+anniv_group = app_commands.Group(name="anniv", description="Configuration du système d'anniversaires (staff)")
+ 
+ 
+@anniv_group.command(name="config", description="[Staff] Active/configure le système d'anniversaires")
+@app_commands.describe(
+    salon="Salon où seront annoncés les anniversaires",
+    message="Message personnalisé (utilise {membre} pour mentionner la personne)",
+)
+async def anniv_config_cmd(interaction: discord.Interaction, salon: discord.TextChannel, message: str = None):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message(
+            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+ 
+    guild_conf = config.setdefault(str(interaction.guild.id), {})
+    anniv_conf = guild_conf.setdefault("anniv_config", {})
+    anniv_conf["channel_id"] = salon.id
+    if message:
+        anniv_conf["message"] = message
+    save_config(config)
+ 
+    await interaction.response.send_message(
+        f"✅ Système d'anniversaires activé ! Les anniversaires seront annoncés dans {salon.mention} "
+        "chaque jour à 9h (heure de Paris).\n"
+        "Les membres peuvent maintenant utiliser `/anniversaire create`.",
+        ephemeral=True,
+    )
+ 
+ 
+@anniv_group.command(name="desactiver", description="[Staff] Désactive le système d'anniversaires")
+async def anniv_desactiver_cmd(interaction: discord.Interaction):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message(
+            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+ 
+    guild_conf = config.setdefault(str(interaction.guild.id), {})
+    if "anniv_config" in guild_conf:
+        del guild_conf["anniv_config"]
+        save_config(config)
+ 
+    await interaction.response.send_message("✅ Système d'anniversaires désactivé sur ce serveur.", ephemeral=True)
+ 
+ 
+bot.tree.add_command(anniv_group)
+ 
+ 
+anniversaire_group = app_commands.Group(name="anniversaire", description="Gère ton anniversaire (jour/mois uniquement)")
+ 
+ 
+@anniversaire_group.command(name="create", description="Enregistre ton anniversaire (jour/mois uniquement)")
+@app_commands.describe(date="Date de ton anniversaire au format JJ/MM (ex : 25/12). Aucune année demandée.")
+async def anniversaire_create_cmd(interaction: discord.Interaction, date: str):
+    if not is_anniv_enabled(interaction.guild.id):
+        await interaction.response.send_message(
+            "❌ Le système d'anniversaires n'est pas activé sur ce serveur.", ephemeral=True
+        )
+        return
+ 
+    parsed = parse_anniv_date(date)
+    if parsed is None:
+        await interaction.response.send_message(
+            "❌ Format de date invalide. Utilise `JJ/MM`, par exemple `25/12`.", ephemeral=True
+        )
+        return
+    jour, mois = parsed
+ 
+    guild_conf = config.setdefault(str(interaction.guild.id), {})
+    birthdays = guild_conf.setdefault("birthdays", {})
+    uid = str(interaction.user.id)
+ 
+    if uid in birthdays:
+        await interaction.response.send_message(
+            "⚠️ Tu as déjà enregistré un anniversaire. Utilise `/anniversaire modifier` pour le changer.",
+            ephemeral=True,
+        )
+        return
+ 
+    birthdays[uid] = {"day": jour, "month": mois}
+    save_config(config)
+ 
+    await interaction.response.send_message(
+        f"✅ Ton anniversaire ({jour:02d}/{mois:02d}) a bien été enregistré 🎉 (aucune année n'est demandée ni stockée).",
+        ephemeral=True,
+    )
+ 
+ 
+@anniversaire_group.command(name="modifier", description="Modifie la date de ton anniversaire déjà enregistré")
+@app_commands.describe(date="Nouvelle date au format JJ/MM (ex : 25/12)")
+async def anniversaire_modifier_cmd(interaction: discord.Interaction, date: str):
+    if not is_anniv_enabled(interaction.guild.id):
+        await interaction.response.send_message(
+            "❌ Le système d'anniversaires n'est pas activé sur ce serveur.", ephemeral=True
+        )
+        return
+ 
+    parsed = parse_anniv_date(date)
+    if parsed is None:
+        await interaction.response.send_message(
+            "❌ Format de date invalide. Utilise `JJ/MM`, par exemple `25/12`.", ephemeral=True
+        )
+        return
+    jour, mois = parsed
+ 
+    guild_conf = config.setdefault(str(interaction.guild.id), {})
+    birthdays = guild_conf.setdefault("birthdays", {})
+    uid = str(interaction.user.id)
+ 
+    if uid not in birthdays:
+        await interaction.response.send_message(
+            "❌ Tu n'as pas encore d'anniversaire enregistré. Utilise `/anniversaire create`.", ephemeral=True
+        )
+        return
+ 
+    birthdays[uid] = {"day": jour, "month": mois}
+    save_config(config)
+ 
+    await interaction.response.send_message(f"✅ Ton anniversaire a été mis à jour : {jour:02d}/{mois:02d}.", ephemeral=True)
+ 
+ 
+@anniversaire_group.command(name="supprimer", description="Supprime ton anniversaire enregistré")
+async def anniversaire_supprimer_cmd(interaction: discord.Interaction):
+    guild_conf = config.setdefault(str(interaction.guild.id), {})
+    birthdays = guild_conf.setdefault("birthdays", {})
+    uid = str(interaction.user.id)
+ 
+    if uid not in birthdays:
+        await interaction.response.send_message("❌ Tu n'as pas d'anniversaire enregistré.", ephemeral=True)
+        return
+ 
+    del birthdays[uid]
+    save_config(config)
+    await interaction.response.send_message("✅ Ton anniversaire a été supprimé.", ephemeral=True)
+ 
+ 
+@anniversaire_group.command(name="liste", description="Affiche les prochains anniversaires du serveur")
+async def anniversaire_liste_cmd(interaction: discord.Interaction):
+    guild_conf = config.get(str(interaction.guild.id), {})
+    birthdays = guild_conf.get("birthdays", {})
+ 
+    if not birthdays:
+        await interaction.response.send_message("Aucun anniversaire enregistré pour le moment.", ephemeral=True)
+        return
+ 
+    today = datetime.now(PARIS_TZ).date()
+ 
+    def prochaine_occurrence(jour: int, mois: int):
+        annee = today.year
+        try:
+            d = datetime(annee, mois, jour, tzinfo=PARIS_TZ).date()
+        except ValueError:
+            d = datetime(annee, 3, 1, tzinfo=PARIS_TZ).date()
+        if d < today:
+            try:
+                d = datetime(annee + 1, mois, jour, tzinfo=PARIS_TZ).date()
+            except ValueError:
+                d = datetime(annee + 1, 3, 1, tzinfo=PARIS_TZ).date()
+        return d
+ 
+    entries = []
+    for uid, bday in birthdays.items():
+        prochaine = prochaine_occurrence(bday["day"], bday["month"])
+        entries.append((prochaine, uid, bday))
+    entries.sort(key=lambda e: e[0])
+ 
+    lignes = []
+    for prochaine, uid, bday in entries[:15]:
+        member = interaction.guild.get_member(int(uid))
+        nom = member.mention if member else f"<@{uid}>"
+        date_str = f"{bday['day']:02d}/{bday['month']:02d}"
+        delta = (prochaine - today).days
+        suffix = "🎉 **Aujourd'hui !**" if delta == 0 else f"dans {delta} jour(s)"
+        lignes.append(f"• {nom} — {date_str} ({suffix})")
+ 
+    embed = discord.Embed(
+        title="🎂 Prochains anniversaires",
+        description="\n".join(lignes),
+        color=discord.Color.pink(),
+    )
+    await interaction.response.send_message(embed=embed)
+ 
+ 
+bot.tree.add_command(anniversaire_group)
+ 
+ 
+# ================================================================
+#          NOTIFICATIONS TIKTOK (/config tiktok)
+# ================================================================
+#
+# ⚠️ TikTok ne propose pas d'API publique officielle permettant de surveiller
+# les nouvelles vidéos d'un compte arbitraire. La méthode ci-dessous analyse
+# le HTML public de la page de profil (aucune connexion ni identifiant TikTok
+# requis) pour retrouver la dernière vidéo publiée. TikTok modifie
+# régulièrement la structure de ses pages et peut bloquer les requêtes
+# automatisées : cette fonctionnalité est donc fournie en best-effort et peut
+# nécessiter une maintenance si TikTok change son site.
+ 
+async def fetch_latest_tiktok_video(username: str):
+    """Récupère {id, url, description} de la dernière vidéo publique du compte,
+    ou None si indisponible/erreur."""
+    url = f"https://www.tiktok.com/@{username}"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+ 
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    return None
+                html = await resp.text()
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        return None
+ 
+    match = re.search(
+        r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>',
+        html,
+        re.DOTALL,
+    )
+    if not match:
+        return None
+ 
+    try:
+        data = json.loads(match.group(1))
+        item_list = data["__DEFAULT_SCOPE__"]["webapp.user-detail"]["userInfo"]["itemList"]
+    except (KeyError, TypeError, json.JSONDecodeError):
+        return None
+ 
+    if not item_list:
+        return None
+ 
+    latest = max(item_list, key=lambda it: int(it.get("createTime", 0) or 0))
+    video_id = latest.get("id")
+    if not video_id:
+        return None
+ 
+    return {
+        "id": str(video_id),
+        "url": f"https://www.tiktok.com/@{username}/video/{video_id}",
+        "description": latest.get("desc", ""),
+    }
+ 
+ 
+@tasks.loop(minutes=TIKTOK_CHECK_INTERVAL_MINUTES)
+async def check_tiktok_loop():
+    video = await fetch_latest_tiktok_video(TIKTOK_USERNAME)
+    if not video:
+        return
+ 
+    last_id = config.get("tiktok_last_video_id")
+    if last_id is None:
+        # Premier lancement : on mémorise la vidéo actuelle sans notifier,
+        # pour ne pas spammer avec d'anciennes vidéos.
+        config["tiktok_last_video_id"] = video["id"]
+        save_config(config)
+        return
+ 
+    if video["id"] == last_id:
+        return
+ 
+    config["tiktok_last_video_id"] = video["id"]
+    save_config(config)
+ 
+    for guild in bot.guilds:
+        guild_conf = config.get(str(guild.id), {})
+        tiktok_conf = guild_conf.get("tiktok_config")
+        if not tiktok_conf or not tiktok_conf.get("channel_id") or not tiktok_conf.get("actif", True):
+            continue
+ 
+        channel = guild.get_channel(tiktok_conf["channel_id"])
+        if channel is None:
+            continue
+ 
+        template = tiktok_conf.get("message") or (
+            f"📱 Nouvelle vidéo TikTok de **@{TIKTOK_USERNAME}** !\n{{lien}}"
+        )
+        texte = template.replace("{lien}", video["url"]).replace("{compte}", f"@{TIKTOK_USERNAME}")
+        try:
+            await channel.send(texte)
+        except discord.HTTPException:
+            pass
+ 
+ 
+@check_tiktok_loop.before_loop
+async def before_check_tiktok_loop():
+    await bot.wait_until_ready()
+ 
+ 
+config_group = app_commands.Group(name="config", description="Commandes de configuration du bot")
+ 
+ 
+@config_group.command(name="tiktok", description=f"[Staff] Configure les notifications de nouvelles vidéos de @{TIKTOK_USERNAME}")
+@app_commands.describe(
+    salon="Salon où seront envoyées les notifications de nouvelles vidéos",
+    message="Message personnalisé (utilise {lien} pour le lien de la vidéo et {compte} pour le nom du compte)",
+    actif="Active ou désactive les notifications (activé par défaut)",
+)
+async def config_tiktok_cmd(
+    interaction: discord.Interaction,
+    salon: discord.TextChannel,
+    message: str = None,
+    actif: bool = True,
+):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message(
+            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+ 
+    guild_conf = config.setdefault(str(interaction.guild.id), {})
+    tiktok_conf = guild_conf.setdefault("tiktok_config", {})
+    tiktok_conf["channel_id"] = salon.id
+    tiktok_conf["actif"] = actif
+    if message:
+        tiktok_conf["message"] = message
+    save_config(config)
+ 
+    etat = "activées ✅" if actif else "désactivées ⏸️"
+    await interaction.response.send_message(
+        f"✅ Notifications TikTok pour **@{TIKTOK_USERNAME}** configurées sur {salon.mention} ({etat}).",
+        ephemeral=True,
+    )
+ 
+ 
+bot.tree.add_command(config_group)
  
  
 # ================================================================
@@ -1524,6 +1938,12 @@ async def on_ready():
  
     if not check_elu_semaine.is_running():
         check_elu_semaine.start()
+ 
+    if not check_anniversaires.is_running():
+        check_anniversaires.start()
+ 
+    if not check_tiktok_loop.is_running():
+        check_tiktok_loop.start()
  
     print(f"✅ Connecté en tant que {bot.user}")
  
