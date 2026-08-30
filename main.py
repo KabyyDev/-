@@ -103,6 +103,7 @@ STAFF_COMMANDS = [
     ("/set updatelogs [salon]", "Définit le salon des nouveautés du bot et y publie le changelog (staff)."),
     ("/animal config [salon]", "Active le système d'animaux à capturer dans ce salon (staff)."),
     ("/animal forcespawn", "Force l'apparition immédiate d'un animal (staff)."),
+    ("/pet spawn", "Force l'apparition immédiate d'un animal (staff, alias de /animal forcespawn)."),
     ("+concept note @membre", "Notez une personne dans la listes des concepts."),
     ("+concept list reset", "Réinitialise la liste Concept."),
     ("/eludelasemaine", "Affiche les règles de l'Élu de la semaine (staff)."),
@@ -1747,6 +1748,31 @@ async def pet_trade_cmd(interaction: discord.Interaction, membre: discord.Member
         view=view,
         ephemeral=True,
     )
+ 
+ 
+@pet_group.command(name="spawn", description="[Staff] Force l'apparition immédiate d'un animal sauvage")
+async def pet_spawn_cmd(interaction: discord.Interaction):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message(
+            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+ 
+    guild_conf = config.get(str(interaction.guild.id), {})
+    animal_conf = guild_conf.get("animal_config")
+    if not animal_conf or not animal_conf.get("channel_id"):
+        await interaction.response.send_message(
+            "❌ Le système d'animaux n'est pas configuré. Utilise `/animal config` d'abord.", ephemeral=True
+        )
+        return
+ 
+    channel = interaction.guild.get_channel(animal_conf["channel_id"])
+    if channel is None:
+        await interaction.response.send_message("❌ Le salon configuré est introuvable.", ephemeral=True)
+        return
+ 
+    await interaction.response.send_message(f"✅ Un animal va apparaître dans {channel.mention} !", ephemeral=True)
+    await spawn_animal(interaction.guild, channel)
  
  
 bot.tree.add_command(pet_group)
