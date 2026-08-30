@@ -1194,8 +1194,8 @@ RARETE_COLORS = {
     "Membre": discord.Color.light_grey(),
 }
  
-ANIMAL_SPAWN_HOUR_MIN = 8       # Heure la plus tôt possible pour un spawn (heure de Paris)
-ANIMAL_SPAWN_HOUR_MAX = 23      # Heure la plus tardive possible pour un spawn
+ANIMAL_SPAWN_HOUR_MIN = 0      # Heure la plus tôt possible pour un spawn (heure de Paris)
+ANIMAL_SPAWN_HOUR_MAX = 24      # Heure la plus tardive possible pour un spawn
 ANIMAL_DESPAWN_SECONDS = 300    # Temps disponible pour capturer l'animal (5 minutes) avant qu'il ne s'enfuie
 ANIMAL_CHECK_INTERVAL_MINUTES = 1
  
