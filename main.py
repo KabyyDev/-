@@ -1,4 +1,3 @@
-
 import os
 import re
 import json
@@ -6,8 +5,10 @@ import uuid
 import random
 import calendar
 import asyncio
+import functools
 import aiohttp
 import discord
+import yt_dlp
 from datetime import datetime, timedelta, time as dt_time
 from zoneinfo import ZoneInfo
 from discord import app_commands
@@ -94,6 +95,9 @@ NORMAL_COMMANDS = [
     ("/animal classement", "Affiche le classement des meilleurs chasseurs d'animaux."),
     ("/pet inventory", "Affiche ton inventaire d'animaux capturés."),
     ("/pet trade [@membre]", "Propose un échange d'animal avec un autre membre."),
+    ("/musique play [nom]", "Recherche une musique et la joue dans ton salon vocal."),
+    ("/musique stop", "Arrête la musique et fait quitter le bot du vocal."),
+    ("/musique restart", "Relance la musique en cours depuis le début."),
 ]
  
 STAFF_COMMANDS = [
@@ -1914,6 +1918,255 @@ bot.tree.add_command(admin_group)
  
  
 # ================================================================
+#                    SYSTÈME DE MUSIQUE (/musique)
+# ================================================================
+#
+# ⚠️ Dépendances supplémentaires nécessaires :
+#     pip install yt-dlp PyNaCl
+# Et FFmpeg doit être installé sur la machine qui héberge le bot
+# (accessible dans le PATH, ou modifie FFMPEG_EXECUTABLE ci-dessous avec
+# le chemin complet, ex: "/usr/bin/ffmpeg").
+#
+# Commandes :
+#   /musique play [nom]  -> recherche "nom" (YouTube) et joue le résultat dans
+#                            le salon vocal où se trouve le membre. Si une
+#                            musique joue déjà, celle-ci est ajoutée à la file
+#                            d'attente et sera jouée automatiquement ensuite.
+#   /musique stop         -> arrête la musique, vide la file d'attente et fait
+#                            quitter le bot du salon vocal.
+#   /musique restart       -> relance la musique en cours depuis le début.
+ 
+FFMPEG_EXECUTABLE = "ffmpeg"  # change en chemin complet si besoin, ex: "/usr/bin/ffmpeg"
+
+YTDL_OPTIONS = {
+    "format": "bestaudio/best",
+    "noplaylist": True,
+    "default_search": "ytsearch1",  # /musique play cherche par nom : on garde le 1er résultat
+    "quiet": True,
+    "no_warnings": True,
+    "source_address": "0.0.0.0",
+}
+
+FFMPEG_BEFORE_OPTIONS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+FFMPEG_OPTIONS = "-vn"
+
+ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
+
+
+class Track:
+    """Représente une musique prête à être jouée (lien audio direct + métadonnées)."""
+
+    def __init__(self, stream_url: str, title: str, webpage_url: str, requester: discord.abc.User):
+        self.stream_url = stream_url  # lien audio direct, streamable par FFmpeg
+        self.title = title
+        self.webpage_url = webpage_url
+        self.requester = requester
+
+
+async def search_track(recherche: str, requester: discord.abc.User) -> Track | None:
+    """Recherche 'recherche' sur YouTube via yt-dlp et retourne le premier résultat trouvé."""
+    loop = asyncio.get_event_loop()
+    try:
+        data = await loop.run_in_executor(
+            None, functools.partial(ytdl.extract_info, recherche, download=False)
+        )
+    except Exception as e:
+        print(f"Erreur yt-dlp lors de la recherche '{recherche}' : {e}")
+        return None
+
+    if data is None:
+        return None
+    if "entries" in data:
+        entries = [e for e in data["entries"] if e]
+        if not entries:
+            return None
+        data = entries[0]
+
+    stream_url = data.get("url")
+    if not stream_url:
+        return None
+
+    return Track(
+        stream_url=stream_url,
+        title=data.get("title", "Titre inconnu"),
+        webpage_url=data.get("webpage_url", recherche),
+        requester=requester,
+    )
+
+
+class GuildMusicState:
+    """État de lecture musicale (file d'attente, piste en cours, connexion vocale) pour un serveur donné."""
+
+    def __init__(self, guild_id: int):
+        self.guild_id = guild_id
+        self.queue: list[Track] = []
+        self.current: Track | None = None
+        self.voice_client: discord.VoiceClient | None = None
+        self.text_channel: discord.abc.Messageable | None = None
+        self.lock = asyncio.Lock()
+
+    def is_playing(self) -> bool:
+        return bool(self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()))
+
+
+music_states: dict[int, GuildMusicState] = {}
+
+
+def get_music_state(guild_id: int) -> GuildMusicState:
+    state = music_states.get(guild_id)
+    if state is None:
+        state = GuildMusicState(guild_id)
+        music_states[guild_id] = state
+    return state
+
+
+def play_track(state: GuildMusicState, track: Track) -> None:
+    """Lance la lecture d'une piste sur la connexion vocale déjà établie."""
+    state.current = track
+    source = discord.FFmpegPCMAudio(
+        track.stream_url,
+        executable=FFMPEG_EXECUTABLE,
+        before_options=FFMPEG_BEFORE_OPTIONS,
+        options=FFMPEG_OPTIONS,
+    )
+
+    def after_playing(error: Exception | None):
+        if error:
+            print(f"Erreur de lecture musicale : {error}")
+        fut = asyncio.run_coroutine_threadsafe(play_next(state), bot.loop)
+        try:
+            fut.result()
+        except Exception as e:
+            print(f"Erreur après la lecture d'une musique : {e}")
+
+    state.voice_client.play(source, after=after_playing)
+
+    if state.text_channel:
+        embed = discord.Embed(
+            title="🎶 Lecture en cours",
+            description=f"[{track.title}]({track.webpage_url})",
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text=f"Demandé par {track.requester.display_name}")
+        asyncio.run_coroutine_threadsafe(state.text_channel.send(embed=embed), bot.loop)
+
+
+async def play_next(state: GuildMusicState) -> None:
+    """Appelé automatiquement à la fin d'une piste : joue la suivante de la file si elle existe."""
+    async with state.lock:
+        if not state.queue:
+            state.current = None
+            return
+        prochaine = state.queue.pop(0)
+        play_track(state, prochaine)
+
+
+async def ensure_voice_connected(interaction: discord.Interaction, state: GuildMusicState) -> bool:
+    """Rejoint (ou déplace le bot vers) le salon vocal où se trouve le membre. Retourne False si impossible."""
+    member = interaction.user
+    if member.voice is None or member.voice.channel is None:
+        await interaction.followup.send(
+            "❌ Tu dois être dans un salon vocal pour utiliser cette commande.", ephemeral=True
+        )
+        return False
+
+    channel = member.voice.channel
+
+    if state.voice_client is None or not state.voice_client.is_connected():
+        try:
+            state.voice_client = await channel.connect()
+        except discord.ClientException:
+            state.voice_client = interaction.guild.voice_client
+        except discord.HTTPException:
+            await interaction.followup.send("❌ Impossible de rejoindre le salon vocal.", ephemeral=True)
+            return False
+    elif state.voice_client.channel.id != channel.id:
+        await state.voice_client.move_to(channel)
+
+    return True
+
+
+musique_group = app_commands.Group(name="musique", description="Système de musique")
+
+
+@musique_group.command(name="play", description="Recherche une musique par son nom et la joue dans ton salon vocal")
+@app_commands.describe(nom="Nom (ou mots-clés) de la musique à rechercher et jouer")
+async def musique_play(interaction: discord.Interaction, nom: str):
+    await interaction.response.defer()
+
+    state = get_music_state(interaction.guild.id)
+    state.text_channel = interaction.channel
+
+    if not await ensure_voice_connected(interaction, state):
+        return
+
+    track = await search_track(nom, interaction.user)
+    if track is None:
+        await interaction.followup.send(
+            "❌ Aucun résultat trouvé pour cette recherche. Essaie avec d'autres mots-clés.", ephemeral=True
+        )
+        return
+
+    async with state.lock:
+        if state.is_playing():
+            state.queue.append(track)
+            await interaction.followup.send(
+                f"➕ **{track.title}** a été ajoutée à la file d'attente (position {len(state.queue)})."
+            )
+        else:
+            play_track(state, track)
+            await interaction.followup.send(f"▶️ Lecture de **{track.title}** lancée !")
+
+
+@musique_group.command(name="stop", description="Arrête la musique, vide la file d'attente et quitte le vocal")
+async def musique_stop(interaction: discord.Interaction):
+    state = music_states.get(interaction.guild.id)
+
+    if state is None or state.voice_client is None or not state.voice_client.is_connected():
+        await interaction.response.send_message("❌ Aucune musique n'est en cours de lecture.", ephemeral=True)
+        return
+
+    state.queue.clear()
+    state.current = None
+
+    # On stoppe l'audio proprement avant de couper la connexion vocale, pour
+    # éviter que le callback `after_playing` ne relance une piste suivante.
+    if state.voice_client.is_playing() or state.voice_client.is_paused():
+        state.voice_client.stop()
+
+    await state.voice_client.disconnect(force=True)
+    state.voice_client = None
+
+    await interaction.response.send_message("⏹️ Musique arrêtée et file d'attente vidée. À bientôt !")
+
+
+@musique_group.command(name="restart", description="Relance la musique en cours depuis le début")
+async def musique_restart(interaction: discord.Interaction):
+    state = music_states.get(interaction.guild.id)
+
+    if state is None or state.current is None or state.voice_client is None or not state.voice_client.is_connected():
+        await interaction.response.send_message("❌ Aucune musique n'est en cours de lecture.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+
+    track_actuelle = state.current
+    fraiche = await search_track(track_actuelle.webpage_url, track_actuelle.requester)
+    if fraiche is None:
+        await interaction.followup.send("❌ Impossible de relancer cette musique.", ephemeral=True)
+        return
+
+    if state.voice_client.is_playing() or state.voice_client.is_paused():
+        state.voice_client.stop()
+
+    play_track(state, fraiche)
+    await interaction.followup.send(f"🔁 **{fraiche.title}** relancée depuis le début !")
+
+
+bot.tree.add_command(musique_group)
+
+
+# ================================================================
 #                      +stats serveur
 # ================================================================
  
@@ -2044,6 +2297,14 @@ UPDATE_LOGS = [
         "description": (
             "Système optionnel : `/animal config` (staff) fait apparaître un animal sauvage par jour, "
             "à une heure aléatoire. Premier arrivé, premier servi ! Voir sa collection avec `/animal collection`."
+        ),
+    },
+    {
+        "titre": "🎶 Système de musique",
+        "description": (
+            "`/musique play [nom]` recherche une musique par son nom et la joue dans ton salon vocal.\n"
+            "`/musique stop` arrête tout et fait quitter le bot du vocal, `/musique restart` relance "
+            "la musique en cours depuis le début."
         ),
     },
 ]
@@ -2722,6 +2983,34 @@ async def on_message(message: discord.Message):
  
  
 # ================================================================
+#      DÉCONNEXION AUTOMATIQUE SI LE SALON VOCAL EST VIDE (musique)
+# ================================================================
+#
+# Si tout le monde quitte le salon vocal (le bot s'y retrouve seul), on
+# arrête la musique et on quitte le vocal automatiquement.
+ 
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    if member.bot:
+        return
+ 
+    guild = member.guild
+    state = music_states.get(guild.id)
+    if state is None or state.voice_client is None or not state.voice_client.is_connected():
+        return
+ 
+    channel = state.voice_client.channel
+    non_bots = [m for m in channel.members if not m.bot]
+    if not non_bots:
+        state.queue.clear()
+        state.current = None
+        if state.voice_client.is_playing() or state.voice_client.is_paused():
+            state.voice_client.stop()
+        await state.voice_client.disconnect(force=True)
+        state.voice_client = None
+ 
+ 
+# ================================================================
 #                    GESTION GLOBALE DES ERREURS
 # ================================================================
 #
@@ -2851,4 +3140,3 @@ if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError("Défini la variable d'environnement DISCORD_TOKEN avant de lancer le bot.")
     bot.run(TOKEN)
- 
