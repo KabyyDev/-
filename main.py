@@ -1,3 +1,4 @@
+
 import os
 import json
 import uuid
@@ -20,7 +21,7 @@ STAFF_ROLE_NAME = "Staff"               # Nom exact du rôle staff sur ton serve
 STATS_CATEGORY_NAME = "🧽 SERVEUR STATS"
 STATS_UPDATE_INTERVAL_MINUTES = 10      # Discord limite les renommages de salons (~2 / 10 min)
 CONFIG_FILE = "config.json"             # Stockage persistant des rôles autorisés à valider
-DEV_GUILD_ID = 1537139988448153640      # ID de ton serveur, pour une synchro instantanée des slash commands
+DEV_GUILD_ID = 1539254757951021147      # ID de ton serveur, pour une synchro instantanée des slash commands
  
 # ---- Élu de la semaine ----
 ELU_ROLE_NAME = "👑 Élu de la semaine"
@@ -88,6 +89,7 @@ STAFF_COMMANDS = [
     ("+absences", "Ouvre un formulaire pour déclarer une absence."),
     ("+role-react setup", "Crée un message à réactions qui donne des rôles."),
     ("/ticketsetup", "Crée un panneau de tickets personnalisable (staff)."),
+    ("/set updatelogs [salon]", "Définit le salon des nouveautés du bot et y publie le changelog (staff)."),
     ("+concept note @membre", "Notez une personne dans la listes des concepts."),
     ("+concept list reset", "Réinitialise la liste Concept."),
     ("/eludelasemaine", "Affiche les règles de l'Élu de la semaine (staff)."),
@@ -820,6 +822,85 @@ async def setrole(interaction: discord.Interaction, categorie: app_commands.Choi
     )
  
 # ================================================================
+#                  /set updatelogs [salon]
+# ================================================================
+#
+# Envoie (et mémorise) le salon où sont publiées les nouveautés du bot.
+# Pour ajouter une nouvelle entrée au changelog, il suffit de compléter
+# la liste UPDATE_LOGS ci-dessous.
+ 
+UPDATE_LOGS = [
+    {
+        "titre": "🎫 Système de tickets",
+        "description": (
+            "Ajout de `/ticketsetup` : crée un panneau de tickets entièrement personnalisable "
+            "(titre, texte, boutons de couleurs, rôle(s) à ping) directement depuis une fenêtre Discord.\n"
+            "Chaque bouton ouvre un salon privé pour l'utilisateur, avec un bouton pour fermer le ticket."
+        ),
+    },
+    {
+        "titre": "👑 Élu de la semaine",
+        "description": (
+            "Chaque dimanche à 00h30 (heure de Paris), le membre ayant envoyé le plus de messages "
+            "dans la semaine reçoit automatiquement le rôle **👑 Élu de la semaine** pendant 7 jours.\n"
+            "Commandes : `/eludelasemaine` (affiche les règles) et `/forcerelu` (force la sélection, staff)."
+        ),
+    },
+]
+ 
+ 
+def build_updatelogs_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="📢 Nouveautés du bot",
+        description="Voici les dernières fonctionnalités ajoutées au bot :",
+        color=discord.Color.blurple(),
+        timestamp=datetime.utcnow(),
+    )
+    for item in UPDATE_LOGS:
+        embed.add_field(name=item["titre"], value=item["description"], inline=False)
+    embed.set_footer(text="Mises à jour du bot")
+    return embed
+ 
+ 
+set_group = app_commands.Group(name="set", description="Commandes de configuration du bot")
+ 
+ 
+@set_group.command(name="updatelogs", description="[Staff] Définit le salon des nouveautés du bot et y publie le changelog")
+@app_commands.describe(salon="Salon où seront envoyées les nouveautés du bot")
+async def set_updatelogs(interaction: discord.Interaction, salon: discord.TextChannel):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message(
+            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+ 
+    guild_conf = config.setdefault(str(interaction.guild.id), {})
+    guild_conf["updatelogs_channel_id"] = salon.id
+    save_config(config)
+ 
+    embed = build_updatelogs_embed()
+    try:
+        await salon.send(embed=embed)
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            f"❌ Je n'ai pas la permission d'envoyer de message dans {salon.mention}.", ephemeral=True
+        )
+        return
+    except discord.HTTPException:
+        await interaction.response.send_message(
+            "❌ Erreur lors de l'envoi des nouveautés dans le salon.", ephemeral=True
+        )
+        return
+ 
+    await interaction.response.send_message(
+        f"✅ Le salon des nouveautés a été défini sur {salon.mention} et le changelog y a été envoyé.",
+        ephemeral=True,
+    )
+ 
+ 
+bot.tree.add_command(set_group)
+ 
+# ================================================================
 #                       +invite-stats
 # ================================================================
  
@@ -1418,9 +1499,20 @@ async def on_ready():
  
     try:
         guild_obj = discord.Object(id=DEV_GUILD_ID)
+ 
+        # 1) On copie les commandes (définies globalement dans le code) vers le
+        #    serveur de dev, puis on les synchronise dessus (quasi instantané).
         bot.tree.copy_global_to(guild=guild_obj)
         synced = await bot.tree.sync(guild=guild_obj)
         print(f"{len(synced)} commande(s) slash synchronisée(s) sur le serveur de dev.")
+ 
+        # 2) On vide ensuite la liste des commandes GLOBALES côté Discord.
+        #    Sans cette étape, si une synchro globale a déjà eu lieu une fois
+        #    (ex: `bot.tree.sync()` sans guild), Discord affiche chaque
+        #    commande en double (une version globale + une version serveur).
+        bot.tree.clear_commands(guild=None)
+        await bot.tree.sync()
+        print("Commandes globales nettoyées (évite les doublons dans /).")
     except Exception as e:
         print(f"Erreur de synchronisation : {e}")
  
