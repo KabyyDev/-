@@ -104,6 +104,7 @@ STAFF_COMMANDS = [
     ("/animal config [salon]", "Active le système d'animaux à capturer dans ce salon (staff)."),
     ("/animal forcespawn", "Force l'apparition immédiate d'un animal (staff)."),
     ("/pet spawn", "Force l'apparition immédiate d'un animal (staff, alias de /animal forcespawn)."),
+    ("/admin panel", "Ouvre le panneau d'administration : boost de chance x10, spawn x10 (staff)."),
     ("+concept note @membre", "Notez une personne dans la listes des concepts."),
     ("+concept list reset", "Réinitialise la liste Concept."),
     ("/eludelasemaine", "Affiche les règles de l'Élu de la semaine (staff)."),
@@ -1198,12 +1199,36 @@ ANIMAL_SPAWN_HOUR_MAX = 23      # Heure la plus tardive possible pour un spawn
 ANIMAL_DESPAWN_SECONDS = 300    # Temps disponible pour capturer l'animal (5 minutes) avant qu'il ne s'enfuie
 ANIMAL_CHECK_INTERVAL_MINUTES = 1
  
+# Boost de chance temporaire (déclenché depuis /admin panel). En mémoire
+# uniquement : {guild_id: {"multiplier": float, "expires_at": datetime}}
+LUCK_BOOST: dict[int, dict] = {}
  
-def pick_random_animal() -> dict:
+ 
+def get_active_luck_multiplier(guild_id: int) -> float:
+    boost = LUCK_BOOST.get(guild_id)
+    if not boost:
+        return 1.0
+    if datetime.now(PARIS_TZ) >= boost["expires_at"]:
+        del LUCK_BOOST[guild_id]
+        return 1.0
+    return boost["multiplier"]
+ 
+ 
+def pick_random_animal(guild_id: int | None = None) -> dict:
     """Tire une rareté selon les pourcentages configurés, puis un animal
-    au hasard parmi ceux de cette rareté."""
+    au hasard parmi ceux de cette rareté. Si un boost de chance est actif sur
+    le serveur, les raretés autres que 'Membre' voient leur poids multiplié."""
     raretes = list(RARETE_WEIGHTS.keys())
     poids = list(RARETE_WEIGHTS.values())
+ 
+    if guild_id is not None:
+        multiplicateur = get_active_luck_multiplier(guild_id)
+        if multiplicateur != 1.0:
+            poids = [
+                p if rarete == "Membre" else p * multiplicateur
+                for rarete, p in zip(raretes, poids)
+            ]
+ 
     rarete_choisie = random.choices(raretes, weights=poids, k=1)[0]
     candidats = [a for a in ANIMAUX if a["rarete"] == rarete_choisie]
     return random.choice(candidats)
@@ -1305,7 +1330,7 @@ class AnimalCaptureView(discord.ui.View):
  
  
 async def spawn_animal(guild: discord.Guild, channel: discord.abc.Messageable) -> None:
-    animal = pick_random_animal()
+    animal = pick_random_animal(guild.id)
     embed = build_animal_spawn_embed(animal)
     view = AnimalCaptureView(animal, guild.id)
     message = await channel.send(embed=embed, view=view)
@@ -1776,6 +1801,116 @@ async def pet_spawn_cmd(interaction: discord.Interaction):
  
  
 bot.tree.add_command(pet_group)
+ 
+ 
+# ================================================================
+#           PANNEAU D'ADMINISTRATION (/admin panel)
+# ================================================================
+#
+# Panneau (visible uniquement par la personne qui l'ouvre) avec des boutons
+# pour déclencher des événements liés au système d'animaux : un boost de
+# chance temporaire et l'apparition de plusieurs animaux d'un coup.
+ 
+LUCK_BOOST_MULTIPLIER = 10
+LUCK_BOOST_DURATION_SECONDS = 90  # 1 min 30
+MASS_SPAWN_COUNT = 10
+MASS_SPAWN_DELAY_SECONDS = 1.5  # petite pause entre chaque spawn pour ne pas saturer le salon
+ 
+ 
+class AdminPanelView(discord.ui.View):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=180)
+        self.guild_id = guild_id
+ 
+    @discord.ui.button(label="🍀 Luck x10 (1 min 30)", style=discord.ButtonStyle.success)
+    async def luck_boost(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_staff(interaction.user):
+            await interaction.response.send_message(
+                "❌ Tu n'as pas la permission d'utiliser ce panneau.", ephemeral=True
+            )
+            return
+ 
+        LUCK_BOOST[self.guild_id] = {
+            "multiplier": LUCK_BOOST_MULTIPLIER,
+            "expires_at": datetime.now(PARIS_TZ) + timedelta(seconds=LUCK_BOOST_DURATION_SECONDS),
+        }
+ 
+        await interaction.response.send_message(
+            f"🍀 Chance x{LUCK_BOOST_MULTIPLIER} activée pendant {LUCK_BOOST_DURATION_SECONDS // 60} min "
+            f"{LUCK_BOOST_DURATION_SECONDS % 60} s !",
+            ephemeral=True,
+        )
+ 
+        guild_conf = config.get(str(self.guild_id), {})
+        animal_conf = guild_conf.get("animal_config")
+        if animal_conf and animal_conf.get("channel_id"):
+            channel = interaction.guild.get_channel(animal_conf["channel_id"])
+            if channel:
+                try:
+                    await channel.send(
+                        "🍀✨ **ÉVÉNEMENT CHANCE x10 !** Pendant 1 min 30, les animaux rares ont bien plus "
+                        "de chances d'apparaître. Restez à l'affût 👀"
+                    )
+                except discord.HTTPException:
+                    pass
+ 
+    @discord.ui.button(label="✨ Spawn x10", style=discord.ButtonStyle.primary)
+    async def spawn_ten(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_staff(interaction.user):
+            await interaction.response.send_message(
+                "❌ Tu n'as pas la permission d'utiliser ce panneau.", ephemeral=True
+            )
+            return
+ 
+        guild_conf = config.get(str(self.guild_id), {})
+        animal_conf = guild_conf.get("animal_config")
+        if not animal_conf or not animal_conf.get("channel_id"):
+            await interaction.response.send_message(
+                "❌ Le système d'animaux n'est pas configuré. Utilise `/animal config` d'abord.", ephemeral=True
+            )
+            return
+ 
+        channel = interaction.guild.get_channel(animal_conf["channel_id"])
+        if channel is None:
+            await interaction.response.send_message("❌ Le salon configuré est introuvable.", ephemeral=True)
+            return
+ 
+        await interaction.response.send_message(
+            f"✨ {MASS_SPAWN_COUNT} animaux vont apparaître dans {channel.mention} !", ephemeral=True
+        )
+        for _ in range(MASS_SPAWN_COUNT):
+            try:
+                await spawn_animal(interaction.guild, channel)
+            except discord.HTTPException:
+                pass
+            await asyncio.sleep(MASS_SPAWN_DELAY_SECONDS)
+ 
+ 
+admin_group = app_commands.Group(name="admin", description="Commandes d'administration du bot")
+ 
+ 
+@admin_group.command(name="panel", description="[Staff] Ouvre le panneau d'administration (boost de chance, spawns multiples...)")
+async def admin_panel_cmd(interaction: discord.Interaction):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message(
+            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+ 
+    embed = discord.Embed(
+        title="🛠️ Panneau d'administration",
+        description=(
+            "**🍀 Luck x10 (1 min 30)** — multiplie par 10 les chances des raretés autres que "
+            "Membre pendant 1 min 30.\n"
+            "**✨ Spawn x10** — fait apparaître 10 animaux d'un coup dans le salon configuré."
+        ),
+        color=discord.Color.dark_gold(),
+    )
+    view = AdminPanelView(interaction.guild.id)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+ 
+ 
+bot.tree.add_command(admin_group)
  
  
 # ================================================================
@@ -2520,6 +2655,47 @@ async def remove_role_cmd(ctx: commands.Context, membre: discord.Member, *, role
  
  
 # ================================================================
+#                    SYSTÈME ANTI-SPAM
+# ================================================================
+#
+# Si un membre envoie 3 fois de suite le même message (dans une fenêtre de
+# 60 secondes), le bot l'avertit. Le compteur est en mémoire (pas persisté
+# dans config.json), il se remet donc à zéro si le bot redémarre.
+ 
+SPAM_WINDOW_SECONDS = 60
+SPAM_THRESHOLD = 3
+ 
+spam_tracker: dict[tuple[int, int], dict] = {}  # (guild_id, user_id) -> {"content", "count", "last_time"}
+ 
+ 
+async def check_spam(message: discord.Message) -> None:
+    contenu = message.content.strip().lower()
+    if not contenu:
+        return
+ 
+    cle = (message.guild.id, message.author.id)
+    maintenant = datetime.now(PARIS_TZ)
+    entree = spam_tracker.get(cle)
+ 
+    if entree and entree["content"] == contenu and (maintenant - entree["last_time"]).total_seconds() <= SPAM_WINDOW_SECONDS:
+        entree["count"] += 1
+        entree["last_time"] = maintenant
+    else:
+        entree = {"content": contenu, "count": 1, "last_time": maintenant}
+ 
+    spam_tracker[cle] = entree
+ 
+    if entree["count"] >= SPAM_THRESHOLD:
+        entree["count"] = 0  # évite de ré-avertir à chaque nouveau message identique
+        try:
+            await message.channel.send(
+                f"⚠️ {message.author.mention}, merci d'éviter d'envoyer plusieurs fois le même message (anti-spam)."
+            )
+        except discord.HTTPException:
+            pass
+ 
+ 
+# ================================================================
 #                          on_message
 # ================================================================
  
@@ -2528,8 +2704,9 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
  
-    # Comptage pour l'Élu de la semaine
     if message.guild is not None:
+        await check_spam(message)
+        # Comptage pour l'Élu de la semaine
         bump_weekly_count(message.guild.id, message.author.id)
  
     if message.content.lower().strip() == "+concept list reset":
