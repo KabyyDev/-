@@ -35,7 +35,7 @@ TICKETS_CATEGORY_NAME = "🎫 TICKETS"     # Catégorie par défaut où sont cr�
  
 # ---- TikTok ----
 TIKTOK_USERNAME = "7vkp2"                # Compte TikTok suivi (https://www.tiktok.com/@7vkp2)
-TIKTOK_CHECK_INTERVAL_MINUTES = 10       # Fréquence de vérification des nouvelles vidéos
+TIKTOK_CHECK_INTERVAL_MINUTES = 2       # Fréquence de vérification des nouvelles vidéos
 # ================================================================
  
 intents = discord.Intents.default()
