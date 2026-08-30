@@ -1,4 +1,3 @@
-
 import os
 import json
 import uuid
@@ -619,11 +618,7 @@ class TicketSetupModal(discord.ui.Modal, title="Configuration du panneau de tick
     boutons = discord.ui.TextInput(
         label="Boutons : Label | emoji | couleur",
         style=discord.TextStyle.paragraph,
-        placeholder=(
-            "Porter Plainte | 📩 | blurple\n"
-            "Contacter le Corps des Officiers | 📩 | green\n"
-            "Contacter les Brigades Spéciales | 📩 | grey"
-        ),
+        placeholder="Porter Plainte | 📩 | blurple\nAutre Contact | 📩 | green",
         max_length=1000,
     )
     categorie_nom = discord.ui.TextInput(
@@ -1445,3 +1440,4 @@ if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError("Défini la variable d'environnement DISCORD_TOKEN avant de lancer le bot.")
     bot.run(TOKEN)
+ 
