@@ -3,3 +3,4 @@ aiohttp>=3.9.0
 python-dotenv
 yt-dlp
 PyNaCl
+davey
