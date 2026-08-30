@@ -19,7 +19,7 @@ load_dotenv()
 # ================================================================
 PREFIX = "+"
  
-STAFF_ROLE_NAME = "Staff"               # Nom exact du rôle staff sur ton serveur
+STAFF_ROLE_NAME = "Ping staff"          # Nom exact du rôle staff sur ton serveur
 STATS_CATEGORY_NAME = "🧽 SERVEUR STATS"
 STATS_UPDATE_INTERVAL_MINUTES = 10      # Discord limite les renommages de salons (~2 / 10 min)
 CONFIG_FILE = "config.json"             # Stockage persistant des rôles autorisés à valider
@@ -35,7 +35,7 @@ TICKETS_CATEGORY_NAME = "🎫 TICKETS"     # Catégorie par défaut où sont cr�
  
 # ---- TikTok ----
 TIKTOK_USERNAME = "7vkp2"                # Compte TikTok suivi (https://www.tiktok.com/@7vkp2)
-TIKTOK_CHECK_INTERVAL_MINUTES = 2       # Fréquence de vérification des nouvelles vidéos
+TIKTOK_CHECK_INTERVAL_MINUTES = 10       # Fréquence de vérification des nouvelles vidéos
 # ================================================================
  
 intents = discord.Intents.default()
@@ -1891,6 +1891,74 @@ async def on_message(message: discord.Message):
         return
  
     await bot.process_commands(message)
+ 
+ 
+# ================================================================
+#                    GESTION GLOBALE DES ERREURS
+# ================================================================
+#
+# Évite que des erreurs comme "403 Forbidden : permissions manquantes"
+# fassent planter une commande sans explication claire, et permet de
+# prévenir la personne concernée plutôt que de simplement écrire dans les logs.
+ 
+@bot.event
+async def on_command_error(ctx: commands.Context, error: commands.CommandError):
+    if isinstance(error, commands.CommandNotFound):
+        return
+ 
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"❌ Argument manquant : `{error.param.name}`. Vérifie la syntaxe avec `+cmds`.")
+        return
+ 
+    if isinstance(error, (commands.BadArgument, commands.MemberNotFound, commands.RoleNotFound)):
+        await ctx.send("❌ Argument invalide (membre, rôle ou valeur introuvable). Vérifie ta commande.")
+        return
+ 
+    original = getattr(error, "original", error)
+ 
+    if isinstance(original, discord.Forbidden):
+        salon_nom = ctx.channel.mention if hasattr(ctx.channel, "mention") else str(ctx.channel)
+        avertissement = (
+            f"❌ Je n'ai pas les permissions nécessaires pour exécuter `{ctx.command}` dans {salon_nom} "
+            f"sur **{ctx.guild.name if ctx.guild else 'ce serveur'}**.\n"
+            "Un membre du staff doit vérifier que mon rôle a bien les permissions "
+            "**Envoyer des messages**, **Intégrer des liens** et **Gérer les salons/rôles** (selon la commande)."
+        )
+        try:
+            await ctx.send(avertissement)
+        except discord.Forbidden:
+            # Impossible d'écrire même le message d'erreur dans ce salon : on prévient en DM.
+            try:
+                await ctx.author.send(avertissement)
+            except discord.HTTPException:
+                pass
+        return
+ 
+    print(f"⚠️ Erreur non gérée dans la commande '{ctx.command}': {error}")
+ 
+ 
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    original = getattr(error, "original", error)
+ 
+    if isinstance(original, discord.Forbidden):
+        message = (
+            "❌ Je n'ai pas les permissions nécessaires pour exécuter cette action ici "
+            "(vérifie mes permissions dans ce salon/cette catégorie)."
+        )
+    elif isinstance(error, app_commands.MissingPermissions):
+        message = "❌ Tu n'as pas la permission d'utiliser cette commande."
+    else:
+        message = "❌ Une erreur est survenue lors de l'exécution de cette commande."
+        print(f"⚠️ Erreur non gérée dans la commande slash '{interaction.command}': {error}")
+ 
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except discord.HTTPException:
+        pass
  
  
 # ================================================================
