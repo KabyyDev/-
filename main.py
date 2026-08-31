@@ -95,16 +95,12 @@ NORMAL_COMMANDS = [
     ("/animal classement", "Affiche le classement des meilleurs chasseurs d'animaux."),
     ("/pet inventory", "Affiche ton inventaire d'animaux capturés."),
     ("/pet trade [@membre]", "Propose un échange d'animal avec un autre membre."),
-    ("/musique play [nom]", "Recherche une musique et la joue dans ton salon vocal."),
-    ("/musique stop", "Arrête la musique et fait quitter le bot du vocal."),
-    ("/musique restart", "Relance la musique en cours depuis le début."),
 ]
  
 STAFF_COMMANDS = [
     ("+absences", "Ouvre un formulaire pour déclarer une absence."),
     ("+role-react setup", "Crée un message à réactions qui donne des rôles."),
     ("/ticketsetup", "Crée un panneau de tickets personnalisable (staff)."),
-    ("/set updatelogs [salon]", "Définit le salon des nouveautés du bot et y publie le changelog (staff)."),
     ("/animal config [salon]", "Active le système d'animaux à capturer dans ce salon (staff)."),
     ("/animal forcespawn", "Force l'apparition immédiate d'un animal (staff)."),
     ("/pet spawn", "Force l'apparition immédiate d'un animal (staff, alias de /animal forcespawn)."),
