@@ -2300,6 +2300,102 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
     except discord.HTTPException as e:
         print(f"[soutiens] ⚠️ Erreur HTTP lors de l'attribution du rôle à {after} : {e}")
  
+# ================================================================
+#           SYSTÈME DE BIENVENUE (/welcome config)
+# ================================================================
+#
+# Système optionnel : /welcome config (staff) choisit le salon d'annonce et
+# personnalise le message envoyé à chaque nouvel arrivant. Le message peut
+# utiliser les variables suivantes :
+#   {membre}          -> mentionne le nouveau membre
+#   {pseudo}          -> pseudo du nouveau membre (sans mention)
+#   {serveur}         -> nom du serveur
+#   {nombre_membres}  -> nombre de membres sur le serveur après son arrivée
+#
+# Le système est désactivé tant qu'aucun salon n'a été configuré.
+ 
+WELCOME_DEFAULT_MESSAGE = "👋 Bienvenue {membre} sur **{serveur}** ! Tu es notre {nombre_membres}e membre."
+ 
+ 
+def get_welcome_config(guild_id: int) -> dict:
+    return config.get(str(guild_id), {}).get("welcome_config", {})
+ 
+ 
+def build_welcome_text(template: str, member: discord.Member) -> str:
+    return (
+        template.replace("{membre}", member.mention)
+        .replace("{pseudo}", member.display_name)
+        .replace("{serveur}", member.guild.name)
+        .replace("{nombre_membres}", str(member.guild.member_count))
+    )
+ 
+ 
+welcome_group = app_commands.Group(name="welcome", description="Configuration du message de bienvenue (staff)")
+ 
+ 
+@welcome_group.command(name="config", description="[Staff] Active/configure le message de bienvenue")
+@app_commands.describe(
+    salon="Salon où sera envoyé le message de bienvenue",
+    message=(
+        "Message personnalisé — variables dispo : {membre} {pseudo} {serveur} {nombre_membres}"
+    ),
+)
+async def welcome_config_cmd(interaction: discord.Interaction, salon: discord.TextChannel, message: str = None):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message(
+            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+ 
+    guild_conf = config.setdefault(str(interaction.guild.id), {})
+    welcome_conf = guild_conf.setdefault("welcome_config", {})
+    welcome_conf["channel_id"] = salon.id
+    if message:
+        welcome_conf["message"] = message
+    save_config(config)
+ 
+    apercu = build_welcome_text(welcome_conf.get("message") or WELCOME_DEFAULT_MESSAGE, interaction.user)
+    await interaction.response.send_message(
+        f"✅ Message de bienvenue activé dans {salon.mention} !\n\n**Aperçu :**\n{apercu}",
+        ephemeral=True,
+    )
+ 
+ 
+@welcome_group.command(name="desactiver", description="[Staff] Désactive le message de bienvenue")
+async def welcome_desactiver_cmd(interaction: discord.Interaction):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message(
+            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+ 
+    guild_conf = config.setdefault(str(interaction.guild.id), {})
+    if "welcome_config" in guild_conf:
+        del guild_conf["welcome_config"]
+        save_config(config)
+ 
+    await interaction.response.send_message("✅ Message de bienvenue désactivé sur ce serveur.", ephemeral=True)
+ 
+ 
+bot.tree.add_command(welcome_group)
+ 
+ 
+async def send_welcome_message(member: discord.Member) -> None:
+    welcome_conf = get_welcome_config(member.guild.id)
+    channel_id = welcome_conf.get("channel_id")
+    if not channel_id:
+        return
+ 
+    channel = member.guild.get_channel(channel_id)
+    if channel is None:
+        return
+ 
+    template = welcome_conf.get("message") or WELCOME_DEFAULT_MESSAGE
+    texte = build_welcome_text(template, member)
+    try:
+        await channel.send(texte)
+    except discord.HTTPException:
+        pass
  
 # ================================================================
 #                    SYSTÈME ANTI-FLOOD
