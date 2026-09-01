@@ -1,3 +1,4 @@
+
 import os
 import re
 import json
@@ -5,7 +6,6 @@ import uuid
 import random
 import calendar
 import asyncio
-import functools
 import aiohttp
 import discord
 import yt_dlp
@@ -43,6 +43,8 @@ TIKTOK_CHECK_INTERVAL_MINUTES = 10       # Fréquence de vérification des nouve
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
+intents.voice_states = True
+intents.presences = True
  
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
  
@@ -95,16 +97,21 @@ NORMAL_COMMANDS = [
     ("/animal classement", "Affiche le classement des meilleurs chasseurs d'animaux."),
     ("/pet inventory", "Affiche ton inventaire d'animaux capturés."),
     ("/pet trade [@membre]", "Propose un échange d'animal avec un autre membre."),
+    ("/music play [recherche]", "Joue une musique (lien YouTube ou recherche) dans ton salon vocal."),
+    ("/music pause / resume / skip / stop / queue", "Contrôle la lecture de musique."),
 ]
  
 STAFF_COMMANDS = [
     ("+absences", "Ouvre un formulaire pour déclarer une absence."),
     ("+role-react setup", "Crée un message à réactions qui donne des rôles."),
     ("/ticketsetup", "Crée un panneau de tickets personnalisable (staff)."),
+    ("/set updatelogs [salon]", "Définit le salon des nouveautés du bot et y publie le changelog (staff)."),
     ("/animal config [salon]", "Active le système d'animaux à capturer dans ce salon (staff)."),
     ("/animal forcespawn", "Force l'apparition immédiate d'un animal (staff)."),
     ("/pet spawn", "Force l'apparition immédiate d'un animal (staff, alias de /animal forcespawn)."),
     ("/admin panel", "Ouvre le panneau d'administration : boost de chance x10, spawn x10 (staff)."),
+    ("/maintenance serveur", "Active/désactive le mode maintenance : salons privés sauf staff (propriétaire uniquement)."),
+    ("/soutiens", "Configure et affiche le panneau des soutiens du serveur (staff)."),
     ("+concept note @membre", "Notez une personne dans la listes des concepts."),
     ("+concept list reset", "Réinitialise la liste Concept."),
     ("/eludelasemaine", "Affiche les règles de l'Élu de la semaine (staff)."),
@@ -1194,8 +1201,8 @@ RARETE_COLORS = {
     "Membre": discord.Color.light_grey(),
 }
  
-ANIMAL_SPAWN_HOUR_MIN = 0      # Heure la plus tôt possible pour un spawn (heure de Paris)
-ANIMAL_SPAWN_HOUR_MAX = 24      # Heure la plus tardive possible pour un spawn
+ANIMAL_SPAWN_HOUR_MIN = 8       # Heure la plus tôt possible pour un spawn (heure de Paris)
+ANIMAL_SPAWN_HOUR_MAX = 23      # Heure la plus tardive possible pour un spawn
 ANIMAL_DESPAWN_SECONDS = 300    # Temps disponible pour capturer l'animal (5 minutes) avant qu'il ne s'enfuie
 ANIMAL_CHECK_INTERVAL_MINUTES = 1
  
@@ -1914,254 +1921,510 @@ bot.tree.add_command(admin_group)
  
  
 # ================================================================
-#                    SYSTÈME DE MUSIQUE (/musique)
+#           MODE MAINTENANCE (/maintenance serveur)
 # ================================================================
 #
-# ⚠️ Dépendances supplémentaires nécessaires :
-#     pip install yt-dlp PyNaCl
-# Et FFmpeg doit être installé sur la machine qui héberge le bot
-# (accessible dans le PATH, ou modifie FFMPEG_EXECUTABLE ci-dessous avec
-# le chemin complet, ex: "/usr/bin/ffmpeg").
-#
-# Commandes :
-#   /musique play [nom]  -> recherche "nom" (YouTube) et joue le résultat dans
-#                            le salon vocal où se trouve le membre. Si une
-#                            musique joue déjà, celle-ci est ajoutée à la file
-#                            d'attente et sera jouée automatiquement ensuite.
-#   /musique stop         -> arrête la musique, vide la file d'attente et fait
-#                            quitter le bot du salon vocal.
-#   /musique restart       -> relance la musique en cours depuis le début.
+# Réservé au PROPRIÉTAIRE du serveur (guild.owner_id), pas seulement aux
+# administrateurs. Bascule (toggle) : la première utilisation verrouille
+# tous les salons pour @everyone (seul le staff garde l'accès), la
+# deuxième utilisation restaure l'état précédent.
  
-FFMPEG_EXECUTABLE = "ffmpeg"  # change en chemin complet si besoin, ex: "/usr/bin/ffmpeg"
-
-YTDL_OPTIONS = {
+MAINTENANCE_ACTION_DELAY_SECONDS = 0.5  # petite pause entre chaque salon pour éviter le rate-limit Discord
+ 
+ 
+def is_server_owner(interaction: discord.Interaction) -> bool:
+    return interaction.guild is not None and interaction.guild.owner_id == interaction.user.id
+ 
+ 
+async def activer_maintenance(guild: discord.Guild) -> dict:
+    """Rend tous les salons invisibles pour @everyone (le staff garde l'accès).
+    Retourne un dict {channel_id: ancienne_valeur_view_channel} pour pouvoir restaurer plus tard."""
+    staff_role = discord.utils.get(guild.roles, name=STAFF_ROLE_NAME)
+    sauvegarde = {}
+ 
+    for channel in guild.channels:
+        try:
+            overwrite_everyone = channel.overwrites_for(guild.default_role)
+            sauvegarde[str(channel.id)] = overwrite_everyone.view_channel  # True / False / None
+ 
+            overwrite_everyone.view_channel = False
+            await channel.set_permissions(guild.default_role, overwrite=overwrite_everyone, reason="Mode maintenance activé")
+ 
+            if staff_role:
+                overwrite_staff = channel.overwrites_for(staff_role)
+                overwrite_staff.view_channel = True
+                await channel.set_permissions(staff_role, overwrite=overwrite_staff, reason="Mode maintenance activé (accès staff)")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        await asyncio.sleep(MAINTENANCE_ACTION_DELAY_SECONDS)
+ 
+    return sauvegarde
+ 
+ 
+async def desactiver_maintenance(guild: discord.Guild, sauvegarde: dict) -> None:
+    """Restaure la visibilité des salons telle qu'elle était avant l'activation."""
+    for channel in guild.channels:
+        try:
+            valeur_precedente = sauvegarde.get(str(channel.id), "ABSENTE")
+            overwrite_everyone = channel.overwrites_for(guild.default_role)
+            overwrite_everyone.view_channel = None if valeur_precedente == "ABSENTE" else valeur_precedente
+            await channel.set_permissions(guild.default_role, overwrite=overwrite_everyone, reason="Fin du mode maintenance")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        await asyncio.sleep(MAINTENANCE_ACTION_DELAY_SECONDS)
+ 
+ 
+maintenance_group = app_commands.Group(name="maintenance", description="Active/désactive le mode maintenance du serveur")
+ 
+ 
+@maintenance_group.command(
+    name="serveur",
+    description="[Propriétaire uniquement] Active/désactive le mode maintenance (salons privés sauf staff)",
+)
+async def maintenance_serveur_cmd(interaction: discord.Interaction):
+    if not is_server_owner(interaction):
+        await interaction.response.send_message(
+            "❌ Seul le propriétaire du serveur peut utiliser cette commande.", ephemeral=True
+        )
+        return
+ 
+    guild_conf = config.setdefault(str(interaction.guild.id), {})
+    maintenance_conf = guild_conf.get("maintenance", {})
+ 
+    await interaction.response.defer(ephemeral=True)
+ 
+    if maintenance_conf.get("active"):
+        await desactiver_maintenance(interaction.guild, maintenance_conf.get("saved_overwrites", {}))
+        guild_conf["maintenance"] = {"active": False}
+        save_config(config)
+        await interaction.followup.send(
+            "✅ Mode maintenance désactivé. Les salons ont retrouvé leur visibilité normale.", ephemeral=True
+        )
+    else:
+        sauvegarde = await activer_maintenance(interaction.guild)
+        guild_conf["maintenance"] = {"active": True, "saved_overwrites": sauvegarde}
+        save_config(config)
+        await interaction.followup.send(
+            "🔒 Mode maintenance activé. Tous les salons sont désormais privés pour tout le monde, "
+            "sauf pour le staff. Relance `/maintenance serveur` pour désactiver.",
+            ephemeral=True,
+        )
+ 
+ 
+bot.tree.add_command(maintenance_group)
+ 
+ 
+# ================================================================
+#              SYSTÈME DE SOUTIENS (/soutiens)
+# ================================================================
+#
+# /soutiens (staff) ouvre une fenêtre pour personnaliser un embed, puis (même
+# principe que /ticketsetup : Discord n'autorise pas les menus déroulants
+# dans une fenêtre) un menu déroulant listant tous les rôles pour choisir
+# lequel attribuer automatiquement.
+#
+# Ensuite, dès qu'un membre met l'un des textes configurés (ex : "/akuma" ou
+# ".gg/akuma") dans son STATUT PERSONNALISÉ Discord, le rôle lui est attribué
+# automatiquement (et retiré s'il enlève ce texte de son statut).
+#
+# ⚠️ Ceci nécessite d'activer l'intent privilégié "Presence Intent" dans le
+# Discord Developer Portal (onglet Bot de ton application), en plus des
+# intents "Server Members" et "Message Content" déjà nécessaires. Sans ça,
+# le bot ne recevra jamais les mises à jour de statut.
+ 
+class SoutiensRoleSelectView(discord.ui.View):
+    """Étape finale de /soutiens : menu déroulant natif listant tous les rôles
+    du serveur, pour choisir lequel attribuer automatiquement."""
+ 
+    def __init__(self, embed_data: dict, triggers_list: list):
+        super().__init__(timeout=300)
+        self.embed_data = embed_data
+        self.triggers_list = triggers_list
+        self._done = False
+ 
+    @discord.ui.select(
+        cls=discord.ui.RoleSelect,
+        placeholder="Rôle à attribuer automatiquement",
+        min_values=1,
+        max_values=1,
+    )
+    async def role_select(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
+        if self._done:
+            return
+        self._done = True
+        role = select.values[0]
+ 
+        guild_conf = config.setdefault(str(interaction.guild.id), {})
+        guild_conf["soutiens_config"] = {
+            "role_id": role.id,
+            "triggers": self.triggers_list,
+            "titre": self.embed_data["titre"],
+            "description": self.embed_data["description"],
+        }
+        save_config(config)
+ 
+        embed = discord.Embed(
+            title=self.embed_data["titre"],
+            description=self.embed_data["description"],
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(
+            name="✅ Comment obtenir le rôle",
+            value=(
+                "Mets l'un des textes suivants dans ton **statut personnalisé Discord** :\n"
+                + "\n".join(f"`{t}`" for t in self.triggers_list)
+            ),
+            inline=False,
+        )
+        embed.set_footer(text=f"Rôle attribué automatiquement : {role.name}")
+ 
+        self.stop()
+        await interaction.response.edit_message(content="✅ Système de soutiens configuré et envoyé ci-dessous !", view=None)
+        await interaction.channel.send(embed=embed)
+ 
+ 
+class SoutiensSetupModal(discord.ui.Modal, title="Configuration du système de soutiens"):
+    titre = discord.ui.TextInput(
+        label="Titre de l'embed",
+        placeholder="Ex : 🎉 Soutiens le serveur !",
+        max_length=256,
+    )
+    description = discord.ui.TextInput(
+        label="Description de l'embed",
+        style=discord.TextStyle.paragraph,
+        placeholder="Explique aux membres comment obtenir le rôle...",
+        max_length=1000,
+    )
+    triggers = discord.ui.TextInput(
+        label="Textes à détecter (1 par ligne)",
+        style=discord.TextStyle.paragraph,
+        placeholder="/akuma\n.gg/akuma",
+        max_length=200,
+    )
+ 
+    async def on_submit(self, interaction: discord.Interaction):
+        triggers_list = [t.strip() for t in self.triggers.value.splitlines() if t.strip()]
+        if not triggers_list:
+            await interaction.response.send_message(
+                "❌ Indique au moins un texte à détecter dans le statut.", ephemeral=True
+            )
+            return
+ 
+        embed_data = {"titre": self.titre.value, "description": self.description.value}
+        await interaction.response.send_message(
+            "🔧 Dernière étape : choisis le rôle à attribuer automatiquement aux membres qui mettent "
+            + ", ".join(f"`{t}`" for t in triggers_list)
+            + " dans leur statut.",
+            view=SoutiensRoleSelectView(embed_data, triggers_list),
+            ephemeral=True,
+        )
+ 
+ 
+@bot.tree.command(name="soutiens", description="[Staff] Configure et affiche le panneau des soutiens du serveur")
+async def soutiens_cmd(interaction: discord.Interaction):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message(
+            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+    await interaction.response.send_modal(SoutiensSetupModal())
+ 
+ 
+@bot.event
+async def on_presence_update(before: discord.Member, after: discord.Member):
+    guild = after.guild
+    if guild is None:
+        return
+ 
+    guild_conf = config.get(str(guild.id), {})
+    soutiens_conf = guild_conf.get("soutiens_config")
+    if not soutiens_conf:
+        return
+ 
+    role = guild.get_role(soutiens_conf.get("role_id"))
+    if role is None:
+        return
+ 
+    triggers = [t.lower() for t in soutiens_conf.get("triggers", [])]
+    if not triggers:
+        return
+ 
+    statut_texte = ""
+    for activity in after.activities:
+        if isinstance(activity, discord.CustomActivity) and activity.name:
+            statut_texte = activity.name.lower()
+            break
+ 
+    correspond = any(trigger in statut_texte for trigger in triggers)
+    a_deja_le_role = role in after.roles
+ 
+    try:
+        if correspond and not a_deja_le_role:
+            await after.add_roles(role, reason="Statut de soutien détecté")
+        elif not correspond and a_deja_le_role:
+            await after.remove_roles(role, reason="Statut de soutien retiré")
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+ 
+ 
+# ================================================================
+#                    SYSTÈME ANTI-FLOOD
+# ================================================================
+#
+# Contrairement à l'anti-spam (même message répété), l'anti-flood surveille
+# le NOMBRE de messages envoyés en peu de temps, peu importe leur contenu.
+# Au-delà du seuil, le membre est automatiquement mute (timeout) quelques
+# instants. Le staff n'est pas concerné par cette limite.
+ 
+FLOOD_WINDOW_SECONDS = 5      # fenêtre de temps surveillée
+FLOOD_THRESHOLD = 5           # nombre de messages autorisés dans cette fenêtre
+FLOOD_TIMEOUT_SECONDS = 60    # durée du mute appliqué en cas de flood détecté
+ 
+flood_tracker: dict[tuple[int, int], list] = {}  # (guild_id, user_id) -> liste d'horodatages récents
+ 
+ 
+async def check_flood(message: discord.Message) -> None:
+    if is_staff(message.author):
+        return
+ 
+    cle = (message.guild.id, message.author.id)
+    maintenant = datetime.now(PARIS_TZ)
+    horodatages = flood_tracker.setdefault(cle, [])
+    horodatages.append(maintenant)
+ 
+    seuil_temps = maintenant - timedelta(seconds=FLOOD_WINDOW_SECONDS)
+    horodatages[:] = [t for t in horodatages if t >= seuil_temps]
+ 
+    if len(horodatages) >= FLOOD_THRESHOLD:
+        horodatages.clear()  # évite de re-déclencher immédiatement après le mute
+        try:
+            until = discord.utils.utcnow() + timedelta(seconds=FLOOD_TIMEOUT_SECONDS)
+            await message.author.timeout(until, reason="Anti-flood : trop de messages envoyés trop rapidement")
+            await message.channel.send(
+                f"🚫 {message.author.mention} a été mute {FLOOD_TIMEOUT_SECONDS}s pour flood "
+                "(trop de messages envoyés trop rapidement)."
+            )
+        except discord.Forbidden:
+            try:
+                await message.channel.send(
+                    f"⚠️ {message.author.mention}, ralentis un peu — tu envoies des messages trop vite ! "
+                    "(je n'ai pas pu te mute automatiquement, vérifie mes permissions)"
+                )
+            except discord.HTTPException:
+                pass
+        except discord.HTTPException:
+            pass
+ 
+ 
+# ================================================================
+#        SYSTÈME DE MUSIQUE BASIQUE (/music play, pause, skip...)
+# ================================================================
+#
+# ⚠️ Dépendances supplémentaires nécessaires (pas incluses par défaut) :
+#   pip install -U "discord.py[voice]" yt-dlp PyNaCl
+# et le binaire FFmpeg doit être installé sur la machine/le conteneur qui
+# héberge le bot (ex: `apt-get install -y ffmpeg` dans le Dockerfile).
+# Sans ffmpeg installé sur le système, la lecture échouera au runtime.
+ 
+YTDL_FORMAT_OPTIONS = {
     "format": "bestaudio/best",
     "noplaylist": True,
-    "default_search": "ytsearch1",  # /musique play cherche par nom : on garde le 1er résultat
+    "nocheckcertificate": True,
+    "ignoreerrors": False,
+    "logtostderr": False,
     "quiet": True,
     "no_warnings": True,
+    "default_search": "ytsearch",
     "source_address": "0.0.0.0",
 }
-
-FFMPEG_BEFORE_OPTIONS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-FFMPEG_OPTIONS = "-vn"
-
-ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
-
-
-class Track:
-    """Représente une musique prête à être jouée (lien audio direct + métadonnées)."""
-
-    def __init__(self, stream_url: str, title: str, webpage_url: str, requester: discord.abc.User):
-        self.stream_url = stream_url  # lien audio direct, streamable par FFmpeg
-        self.title = title
-        self.webpage_url = webpage_url
-        self.requester = requester
-
-
-async def search_track(recherche: str, requester: discord.abc.User) -> Track | None:
-    """Recherche 'recherche' sur YouTube via yt-dlp et retourne le premier résultat trouvé."""
+ 
+FFMPEG_OPTIONS = {
+    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+    "options": "-vn",
+}
+ 
+music_queues: dict[int, list] = {}  # guild_id -> liste de pistes {"title", "url", "webpage_url", "requester"}
+ 
+ 
+def get_music_queue(guild_id: int) -> list:
+    return music_queues.setdefault(guild_id, [])
+ 
+ 
+async def get_track_info(recherche: str) -> dict:
+    """Extrait les infos (titre + URL de flux direct) via yt-dlp. Bloquant, donc
+    exécuté dans un executor pour ne pas geler la boucle d'événements."""
     loop = asyncio.get_event_loop()
+ 
+    def _extract():
+        with yt_dlp.YoutubeDL(YTDL_FORMAT_OPTIONS) as ytdl:
+            return ytdl.extract_info(recherche, download=False)
+ 
+    data = await loop.run_in_executor(None, _extract)
+    if data and "entries" in data:
+        data = data["entries"][0]
+ 
+    return {
+        "title": data.get("title") if data else None,
+        "url": data.get("url") if data else None,
+        "webpage_url": data.get("webpage_url") if data else None,
+    }
+ 
+ 
+async def start_playback(guild: discord.Guild, channel: discord.abc.Messageable) -> None:
+    """Joue la prochaine piste de la file si rien n'est déjà en cours de lecture."""
+    voice_client = guild.voice_client
+    if voice_client is None:
+        return
+    if voice_client.is_playing() or voice_client.is_paused():
+        return
+ 
+    queue = get_music_queue(guild.id)
+    if not queue:
+        return
+ 
+    track = queue.pop(0)
+ 
     try:
-        data = await loop.run_in_executor(
-            None, functools.partial(ytdl.extract_info, recherche, download=False)
-        )
+        source = discord.FFmpegPCMAudio(track["url"], **FFMPEG_OPTIONS)
     except Exception as e:
-        print(f"Erreur yt-dlp lors de la recherche '{recherche}' : {e}")
-        return None
-
-    if data is None:
-        return None
-    if "entries" in data:
-        entries = [e for e in data["entries"] if e]
-        if not entries:
-            return None
-        data = entries[0]
-
-    stream_url = data.get("url")
-    if not stream_url:
-        return None
-
-    return Track(
-        stream_url=stream_url,
-        title=data.get("title", "Titre inconnu"),
-        webpage_url=data.get("webpage_url", recherche),
-        requester=requester,
-    )
-
-
-class GuildMusicState:
-    """État de lecture musicale (file d'attente, piste en cours, connexion vocale) pour un serveur donné."""
-
-    def __init__(self, guild_id: int):
-        self.guild_id = guild_id
-        self.queue: list[Track] = []
-        self.current: Track | None = None
-        self.voice_client: discord.VoiceClient | None = None
-        self.text_channel: discord.abc.Messageable | None = None
-        self.lock = asyncio.Lock()
-
-    def is_playing(self) -> bool:
-        return bool(self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()))
-
-
-music_states: dict[int, GuildMusicState] = {}
-
-
-def get_music_state(guild_id: int) -> GuildMusicState:
-    state = music_states.get(guild_id)
-    if state is None:
-        state = GuildMusicState(guild_id)
-        music_states[guild_id] = state
-    return state
-
-
-def play_track(state: GuildMusicState, track: Track) -> None:
-    """Lance la lecture d'une piste sur la connexion vocale déjà établie."""
-    state.current = track
-    source = discord.FFmpegPCMAudio(
-        track.stream_url,
-        executable=FFMPEG_EXECUTABLE,
-        before_options=FFMPEG_BEFORE_OPTIONS,
-        options=FFMPEG_OPTIONS,
-    )
-
-    def after_playing(error: Exception | None):
+        try:
+            await channel.send(f"❌ Impossible de lire **{track['title']}** : {e}")
+        except discord.HTTPException:
+            pass
+        await start_playback(guild, channel)
+        return
+ 
+    def _after_playing(error):
         if error:
-            print(f"Erreur de lecture musicale : {error}")
-        fut = asyncio.run_coroutine_threadsafe(play_next(state), bot.loop)
+            print(f"⚠️ Erreur de lecture musique : {error}")
+        fut = asyncio.run_coroutine_threadsafe(start_playback(guild, channel), bot.loop)
         try:
             fut.result()
         except Exception as e:
-            print(f"Erreur après la lecture d'une musique : {e}")
-
-    state.voice_client.play(source, after=after_playing)
-
-    if state.text_channel:
-        embed = discord.Embed(
-            title="🎶 Lecture en cours",
-            description=f"[{track.title}]({track.webpage_url})",
-            color=discord.Color.blurple(),
-        )
-        embed.set_footer(text=f"Demandé par {track.requester.display_name}")
-        asyncio.run_coroutine_threadsafe(state.text_channel.send(embed=embed), bot.loop)
-
-
-async def play_next(state: GuildMusicState) -> None:
-    """Appelé automatiquement à la fin d'une piste : joue la suivante de la file si elle existe."""
-    async with state.lock:
-        if not state.queue:
-            state.current = None
-            return
-        prochaine = state.queue.pop(0)
-        play_track(state, prochaine)
-
-
-async def ensure_voice_connected(interaction: discord.Interaction, state: GuildMusicState) -> bool:
-    """Rejoint (ou déplace le bot vers) le salon vocal où se trouve le membre. Retourne False si impossible."""
-    member = interaction.user
-    if member.voice is None or member.voice.channel is None:
-        await interaction.followup.send(
+            print(f"⚠️ Erreur après lecture musique : {e}")
+ 
+    voice_client.play(source, after=_after_playing)
+    try:
+        await channel.send(f"🎶 Lecture en cours : **{track['title']}** (demandé par {track['requester'].mention})")
+    except discord.HTTPException:
+        pass
+ 
+ 
+music_group = app_commands.Group(name="music", description="Commandes de musique")
+ 
+ 
+@music_group.command(name="play", description="Joue une musique (lien YouTube ou recherche) dans ton salon vocal")
+@app_commands.describe(recherche="Lien YouTube ou termes de recherche")
+async def music_play_cmd(interaction: discord.Interaction, recherche: str):
+    if interaction.user.voice is None or interaction.user.voice.channel is None:
+        await interaction.response.send_message(
             "❌ Tu dois être dans un salon vocal pour utiliser cette commande.", ephemeral=True
         )
-        return False
-
-    channel = member.voice.channel
-
-    if state.voice_client is None or not state.voice_client.is_connected():
-        try:
-            state.voice_client = await channel.connect()
-        except discord.ClientException:
-            state.voice_client = interaction.guild.voice_client
-        except discord.HTTPException:
-            await interaction.followup.send("❌ Impossible de rejoindre le salon vocal.", ephemeral=True)
-            return False
-    elif state.voice_client.channel.id != channel.id:
-        await state.voice_client.move_to(channel)
-
-    return True
-
-
-musique_group = app_commands.Group(name="musique", description="Système de musique")
-
-
-@musique_group.command(name="play", description="Recherche une musique par son nom et la joue dans ton salon vocal")
-@app_commands.describe(nom="Nom (ou mots-clés) de la musique à rechercher et jouer")
-async def musique_play(interaction: discord.Interaction, nom: str):
+        return
+ 
     await interaction.response.defer()
-
-    state = get_music_state(interaction.guild.id)
-    state.text_channel = interaction.channel
-
-    if not await ensure_voice_connected(interaction, state):
+ 
+    voice_channel = interaction.user.voice.channel
+    voice_client = interaction.guild.voice_client
+ 
+    try:
+        if voice_client is None:
+            voice_client = await voice_channel.connect()
+        elif voice_client.channel != voice_channel:
+            await voice_client.move_to(voice_channel)
+    except discord.ClientException:
+        await interaction.followup.send("❌ Impossible de rejoindre le salon vocal.")
         return
-
-    track = await search_track(nom, interaction.user)
-    if track is None:
-        await interaction.followup.send(
-            "❌ Aucun résultat trouvé pour cette recherche. Essaie avec d'autres mots-clés.", ephemeral=True
-        )
+ 
+    try:
+        info = await get_track_info(recherche)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Impossible de trouver/lire cette musique : {e}")
         return
-
-    async with state.lock:
-        if state.is_playing():
-            state.queue.append(track)
-            await interaction.followup.send(
-                f"➕ **{track.title}** a été ajoutée à la file d'attente (position {len(state.queue)})."
-            )
-        else:
-            play_track(state, track)
-            await interaction.followup.send(f"▶️ Lecture de **{track.title}** lancée !")
-
-
-@musique_group.command(name="stop", description="Arrête la musique, vide la file d'attente et quitte le vocal")
-async def musique_stop(interaction: discord.Interaction):
-    state = music_states.get(interaction.guild.id)
-
-    if state is None or state.voice_client is None or not state.voice_client.is_connected():
+ 
+    if not info.get("url"):
+        await interaction.followup.send("❌ Aucun résultat trouvé.")
+        return
+ 
+    track = {
+        "title": info["title"] or recherche,
+        "url": info["url"],
+        "webpage_url": info.get("webpage_url"),
+        "requester": interaction.user,
+    }
+    queue = get_music_queue(interaction.guild.id)
+    queue.append(track)
+ 
+    if voice_client.is_playing() or voice_client.is_paused():
+        await interaction.followup.send(f"➕ Ajouté à la file d'attente : **{track['title']}**")
+    else:
+        await interaction.followup.send(f"🔎 Trouvé : **{track['title']}** — lancement de la lecture...")
+        await start_playback(interaction.guild, interaction.channel)
+ 
+ 
+@music_group.command(name="pause", description="Met la musique en pause")
+async def music_pause_cmd(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    if vc is None or not vc.is_playing():
         await interaction.response.send_message("❌ Aucune musique n'est en cours de lecture.", ephemeral=True)
         return
-
-    state.queue.clear()
-    state.current = None
-
-    # On stoppe l'audio proprement avant de couper la connexion vocale, pour
-    # éviter que le callback `after_playing` ne relance une piste suivante.
-    if state.voice_client.is_playing() or state.voice_client.is_paused():
-        state.voice_client.stop()
-
-    await state.voice_client.disconnect(force=True)
-    state.voice_client = None
-
-    await interaction.response.send_message("⏹️ Musique arrêtée et file d'attente vidée. À bientôt !")
-
-
-@musique_group.command(name="restart", description="Relance la musique en cours depuis le début")
-async def musique_restart(interaction: discord.Interaction):
-    state = music_states.get(interaction.guild.id)
-
-    if state is None or state.current is None or state.voice_client is None or not state.voice_client.is_connected():
+    vc.pause()
+    await interaction.response.send_message("⏸️ Musique mise en pause.")
+ 
+ 
+@music_group.command(name="resume", description="Reprend la lecture après une pause")
+async def music_resume_cmd(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    if vc is None or not vc.is_paused():
+        await interaction.response.send_message("❌ La musique n'est pas en pause.", ephemeral=True)
+        return
+    vc.resume()
+    await interaction.response.send_message("▶️ Lecture reprise.")
+ 
+ 
+@music_group.command(name="skip", description="Passe à la musique suivante dans la file")
+async def music_skip_cmd(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    if vc is None or (not vc.is_playing() and not vc.is_paused()):
         await interaction.response.send_message("❌ Aucune musique n'est en cours de lecture.", ephemeral=True)
         return
-
-    await interaction.response.defer()
-
-    track_actuelle = state.current
-    fraiche = await search_track(track_actuelle.webpage_url, track_actuelle.requester)
-    if fraiche is None:
-        await interaction.followup.send("❌ Impossible de relancer cette musique.", ephemeral=True)
+    vc.stop()  # déclenche le callback "after", qui enchaîne automatiquement sur la piste suivante
+    await interaction.response.send_message("⏭️ Musique passée.")
+ 
+ 
+@music_group.command(name="stop", description="Arrête la musique, vide la file et quitte le salon vocal")
+async def music_stop_cmd(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    if vc is None:
+        await interaction.response.send_message("❌ Je ne suis dans aucun salon vocal.", ephemeral=True)
         return
-
-    if state.voice_client.is_playing() or state.voice_client.is_paused():
-        state.voice_client.stop()
-
-    play_track(state, fraiche)
-    await interaction.followup.send(f"🔁 **{fraiche.title}** relancée depuis le début !")
-
-
-bot.tree.add_command(musique_group)
-
-
+    get_music_queue(interaction.guild.id).clear()
+    vc.stop()
+    await vc.disconnect()
+    await interaction.response.send_message("⏹️ Musique arrêtée, file vidée, salon vocal quitté.")
+ 
+ 
+@music_group.command(name="queue", description="Affiche la file d'attente actuelle")
+async def music_queue_cmd(interaction: discord.Interaction):
+    queue = get_music_queue(interaction.guild.id)
+    vc = interaction.guild.voice_client
+ 
+    lignes = []
+    if vc and (vc.is_playing() or vc.is_paused()):
+        lignes.append("🎶 Une musique est actuellement en cours de lecture.")
+    if not queue:
+        lignes.append("La file d'attente est vide.")
+    else:
+        for i, track in enumerate(queue[:10], start=1):
+            lignes.append(f"{i}. **{track['title']}** — demandé par {track['requester'].mention}")
+ 
+    embed = discord.Embed(title="🎶 File d'attente", description="\n".join(lignes), color=discord.Color.blurple())
+    await interaction.response.send_message(embed=embed)
+ 
+ 
+bot.tree.add_command(music_group)
+ 
+ 
 # ================================================================
 #                      +stats serveur
 # ================================================================
@@ -2293,14 +2556,6 @@ UPDATE_LOGS = [
         "description": (
             "Système optionnel : `/animal config` (staff) fait apparaître un animal sauvage par jour, "
             "à une heure aléatoire. Premier arrivé, premier servi ! Voir sa collection avec `/animal collection`."
-        ),
-    },
-    {
-        "titre": "🎶 Système de musique",
-        "description": (
-            "`/musique play [nom]` recherche une musique par son nom et la joue dans ton salon vocal.\n"
-            "`/musique stop` arrête tout et fait quitter le bot du vocal, `/musique restart` relance "
-            "la musique en cours depuis le début."
         ),
     },
 ]
@@ -2963,6 +3218,7 @@ async def on_message(message: discord.Message):
  
     if message.guild is not None:
         await check_spam(message)
+        await check_flood(message)
         # Comptage pour l'Élu de la semaine
         bump_weekly_count(message.guild.id, message.author.id)
  
@@ -2976,34 +3232,6 @@ async def on_message(message: discord.Message):
         return
  
     await bot.process_commands(message)
- 
- 
-# ================================================================
-#      DÉCONNEXION AUTOMATIQUE SI LE SALON VOCAL EST VIDE (musique)
-# ================================================================
-#
-# Si tout le monde quitte le salon vocal (le bot s'y retrouve seul), on
-# arrête la musique et on quitte le vocal automatiquement.
- 
-@bot.event
-async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-    if member.bot:
-        return
- 
-    guild = member.guild
-    state = music_states.get(guild.id)
-    if state is None or state.voice_client is None or not state.voice_client.is_connected():
-        return
- 
-    channel = state.voice_client.channel
-    non_bots = [m for m in channel.members if not m.bot]
-    if not non_bots:
-        state.queue.clear()
-        state.current = None
-        if state.voice_client.is_playing() or state.voice_client.is_paused():
-            state.voice_client.stop()
-        await state.voice_client.disconnect(force=True)
-        state.voice_client = None
  
  
 # ================================================================
@@ -3136,3 +3364,4 @@ if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError("Défini la variable d'environnement DISCORD_TOKEN avant de lancer le bot.")
     bot.run(TOKEN)
+ 
