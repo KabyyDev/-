@@ -1309,13 +1309,17 @@ ANIMAUX = [
     {"nom": "9z_wl", "rarete": "Membre"},
     {"nom": "Beurre2KKhouette", "rarete": "Membre"},
     {"nom": "Slayzxx", "rarete": "Membre"},
+    {"nom": "doren99", "rarete": "Membre"},
+    {"nom": "Ryzz", "rarete": "Modérateur"},
+    {"nom": "Velvelte", "rarete": "Animateur"},
 ]
 
 RARETE_WEIGHTS = {
     "Owner": 0.5,
     "Co-Owner": 2,
     "Modérateur": 10,
-    "VIP": 28,
+    "Animateur": 8,
+    "VIP": 20,
     "Membre": 59.5,
 }
 
@@ -1323,6 +1327,7 @@ RARETE_COLORS = {
     "Owner": discord.Color.red(),
     "Co-Owner": discord.Color.orange(),
     "Modérateur": discord.Color.purple(),
+    "Animateur": discord.Color.green(),
     "VIP": discord.Color.gold(),
     "Membre": discord.Color.light_grey(),
 }
