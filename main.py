@@ -23,7 +23,7 @@ STAFF_ROLE_NAME = "Ping staff"          # Nom exact du rôle staff sur ton serve
 STATS_CATEGORY_NAME = "🧽 SERVEUR STATS"
 STATS_UPDATE_INTERVAL_MINUTES = 10      # Discord limite les renommages de salons (~2 / 10 min)
 CONFIG_FILE = "config.json"             # Stockage persistant des rôles autorisés à valider
-DEV_GUILD_ID = 1539254757951021147      # ID de ton serveur, pour une synchro instantanée des slash commands
+DEV_GUILD_ID = 1537139988448153640      # ID de ton serveur, pour une synchro instantanée des slash commands
  
 # ---- Élu de la semaine ----
 ELU_ROLE_NAME = "👑 Élu de la semaine"
