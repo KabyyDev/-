@@ -2314,7 +2314,7 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
 #
 # Le système est désactivé tant qu'aucun salon n'a été configuré.
  
-WELCOME_DEFAULT_MESSAGE = "👋 Bienvenue {membre} sur **{serveur}** ! Tu es notre {nombre_membres}e membre."
+WELCOME_DEFAULT_MESSAGE = "👋 Bienvenue {membre} sur **{serveur}** ! Tu es notre {nombre_membres}e membres."
  
  
 def get_welcome_config(guild_id: int) -> dict:
