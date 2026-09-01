@@ -4,3 +4,4 @@ python-dotenv
 yt-dlp
 PyNaCl
 davey
+pip install -U "discord.py[voice]" yt-dlp PyNaCl
