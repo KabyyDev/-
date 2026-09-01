@@ -23,7 +23,7 @@ STAFF_ROLE_NAME = "Ping staff"          # Nom exact du rôle staff sur ton serve
 STATS_CATEGORY_NAME = "🧽 SERVEUR STATS"
 STATS_UPDATE_INTERVAL_MINUTES = 10      # Discord limite les renommages de salons (~2 / 10 min)
 CONFIG_FILE = "config.json"             # Stockage persistant des rôles autorisés à valider
-DEV_GUILD_ID = 1537139988448153640      # ID de ton serveur, pour une synchro instantanée des slash commands
+DEV_GUILD_ID = 1539254757951021147      # ID de ton serveur, pour une synchro instantanée des slash commands
  
 # ---- Élu de la semaine ----
 ELU_ROLE_NAME = "👑 Élu de la semaine"
@@ -95,6 +95,14 @@ NORMAL_COMMANDS = [
     ("/pet inventory", "Affiche ton inventaire d'animaux capturés."),
     ("/pet trade [@membre]", "Propose un échange d'animal avec un autre membre."),
     ("/report envoyer [@membre] [raison]", "Signale discrètement un membre au staff."),
+    ("/guilde create", "Crée une guilde et ouvre le formulaire de création."),
+    ("/guilde info [id]", "Affiche les informations d’une guilde."),
+    ("/guilde invite [@membre]", "Invite un membre dans ta guilde."),
+    ("/guilde join [id]", "Rejoint une guilde publique."),
+    ("/guilde leave", "Quitte ta guilde actuelle."),
+    ("/guilde members", "Affiche les membres de ta guilde."),
+    ("/guilde rename [nom]", "Change le nom de ta guilde au niveau 5, une seule fois."),
+    ("/guilde icon [url]", "Définit l’icône personnalisée de ta guilde (niveau 1)."),
 ]
  
 STAFF_COMMANDS = [
@@ -123,6 +131,8 @@ STAFF_COMMANDS = [
     ("+unlock", "Déverrouille le salon."),
     ("/report config [salon]", "Définit le salon privé où arrivent les signalements (staff)."),
     ("/report historique [@membre]", "Affiche les signalements reçus contre un membre (staff)."),
+    ("/guilde verif", "Affiche les guildes en attente de vérification."),
+    ("/guilde delete [id]", "Supprime une guilde par son ID."),
 ]
 
 
@@ -207,6 +217,657 @@ async def cmds_command(ctx: commands.Context, sous_commande: str = None):
     await ctx.send(embed=embed)
  
  
+
+# ================================================================
+#                       SYSTÈME DE GUILDES
+# ================================================================
+#
+# Les guildes sont stockées dans config.json, comme les autres systèmes du bot.
+# Une guilde commence au niveau 1 avec 10 places. Elle gagne de l'XP via
+# l'activité de ses membres (10 XP toutes les 60 secondes par membre).
+# Niveau 5 : changement de nom disponible une seule fois.
+# Niveau 10 : capacité maximale portée à 20 membres.
+#
+# La création est soumise à validation du staff. Les guildes publiques peuvent
+# ensuite être rejointes avec /guilde join <id>, tandis que les guildes privées
+# restent accessibles uniquement sur invitation.
+
+GUILD_START_MAX_MEMBERS = 10
+GUILD_MAX_MEMBERS = 20
+GUILD_MAX_LEVEL = 10
+GUILD_XP_PER_MESSAGE = 10
+GUILD_XP_COOLDOWN_SECONDS = 60
+GUILD_RENAME_LEVEL = 5
+GUILD_ICON_LEVEL = 1
+GUILD_CAPACITY_LEVEL = 10
+GUILD_ID_LENGTH = 6
+
+# Cooldown XP en mémoire : {guild_id: {user_id: datetime}}
+GUILD_XP_COOLDOWNS: dict[int, dict[int, datetime]] = {}
+
+
+def get_server_guilds(guild_id: int) -> dict:
+    guild_conf = config.setdefault(str(guild_id), {})
+    return guild_conf.setdefault("guilds", {})
+
+
+def save_server_guilds(guild_id: int, guilds: dict) -> None:
+    guild_conf = config.setdefault(str(guild_id), {})
+    guild_conf["guilds"] = guilds
+    save_config(config)
+
+
+def generate_guild_id(guilds: dict) -> str:
+    while True:
+        guild_id = "G-" + uuid.uuid4().hex[:GUILD_ID_LENGTH].upper()
+        if guild_id not in guilds:
+            return guild_id
+
+
+def normalize_guild_visibility(value: str) -> str | None:
+    value = value.strip().lower()
+    if value in {"publique", "public", "pub", "ouverte", "ouvert"}:
+        return "public"
+    if value in {"privée", "privee", "private", "privé", "prive", "invite", "invitation"}:
+        return "private"
+    return None
+
+
+def find_member_guild(guild_id: int, user_id: int):
+    user_id = int(user_id)
+    for guild_key, guild_data in get_server_guilds(guild_id).items():
+        members = [int(uid) for uid in guild_data.get("members", [])]
+        if user_id in members:
+            return guild_key, guild_data
+    return None, None
+
+
+def guild_level_from_xp(xp: int) -> int:
+    return min(GUILD_MAX_LEVEL, max(1, 1 + int(xp) // 100))
+
+
+def guild_max_members(level: int) -> int:
+    return GUILD_MAX_MEMBERS if level >= GUILD_CAPACITY_LEVEL else GUILD_START_MAX_MEMBERS
+
+
+def ensure_guild_defaults(guild_data: dict) -> bool:
+    """Mise à niveau des anciennes entrées de config si nécessaire."""
+    changed = False
+    defaults = {
+        "description": "Aucune description.",
+        "owner_id": 0,
+        "icon_url": None,
+        "visibility": "private",
+        "level": 1,
+        "xp": 0,
+        "max_members": GUILD_START_MAX_MEMBERS,
+        "rename_available": False,
+        "verified": False,
+        "members": [],
+        "created_at": datetime.now(PARIS_TZ).isoformat(),
+    }
+    for key, value in defaults.items():
+        if key not in guild_data:
+            guild_data[key] = value
+            changed = True
+
+    calculated_level = guild_level_from_xp(guild_data.get("xp", 0))
+    if guild_data.get("level") != calculated_level:
+        guild_data["level"] = calculated_level
+        changed = True
+
+    calculated_max = guild_max_members(calculated_level)
+    if guild_data.get("max_members") != calculated_max:
+        guild_data["max_members"] = calculated_max
+        changed = True
+
+    # Le niveau 5 débloque le changement de nom, sauf s'il a déjà été consommé.
+    if calculated_level >= GUILD_RENAME_LEVEL and "rename_available" not in guild_data:
+        guild_data["rename_available"] = True
+        changed = True
+
+    return changed
+
+
+def build_guild_embed(guild_id: str, guild_data: dict, discord_guild: discord.Guild) -> discord.Embed:
+    ensure_guild_defaults(guild_data)
+    level = guild_data["level"]
+    members = guild_data.get("members", [])
+    max_members = guild_max_members(level)
+    visibility = "🌐 Publique" if guild_data.get("visibility") == "public" else "🔒 Sur invitation"
+    status = "✅ Vérifiée" if guild_data.get("verified") else "⏳ En attente de vérification"
+
+    embed = discord.Embed(
+        title=f"🏰 {guild_data['name']}",
+        description=guild_data.get("description") or "Aucune description.",
+        color=discord.Color.blurple(),
+    )
+    if guild_data.get("icon_url"):
+        embed.set_thumbnail(url=guild_data["icon_url"])
+
+    owner = discord_guild.get_member(int(guild_data["owner_id"]))
+    owner_text = owner.mention if owner else f"<@{guild_data['owner_id']}>"
+    xp = int(guild_data.get("xp", 0))
+    current_level_xp = xp % 100 if level < GUILD_MAX_LEVEL else 100
+    progress = "MAX" if level >= GUILD_MAX_LEVEL else f"{current_level_xp}/100 XP"
+
+    embed.add_field(name="🆔 ID", value=f"`{guild_id}`", inline=True)
+    embed.add_field(name="👑 Fondateur", value=owner_text, inline=True)
+    embed.add_field(name="📈 Niveau", value=f"Niveau **{level}** • {progress}", inline=True)
+    embed.add_field(name="👥 Membres", value=f"**{len(members)}/{max_members}**", inline=True)
+    embed.add_field(name="🔐 Accès", value=visibility, inline=True)
+    embed.add_field(name="📋 Statut", value=status, inline=True)
+
+    if level >= GUILD_RENAME_LEVEL:
+        rename_status = "Disponible" if guild_data.get("rename_available", False) else "Déjà utilisé"
+        embed.add_field(name="✏️ Changement de nom", value=rename_status, inline=True)
+    if level >= GUILD_ICON_LEVEL:
+        embed.add_field(name="🖼️ Icône", value="Personnalisée" if guild_data.get("icon_url") else "Aucune", inline=True)
+
+    return embed
+
+
+class GuildCreateModal(discord.ui.Modal, title="Créer une guilde"):
+    nom = discord.ui.TextInput(
+        label="Nom de la guilde",
+        placeholder="Ex : Les Dragons",
+        min_length=2,
+        max_length=40,
+    )
+    description = discord.ui.TextInput(
+        label="Description",
+        placeholder="Décris ta guilde en quelques mots...",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=500,
+    )
+    visibilite = discord.ui.TextInput(
+        label="Accès : publique ou privée",
+        placeholder="Écris : publique ou privée",
+        min_length=5,
+        max_length=20,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message("❌ Cette commande doit être utilisée sur un serveur.", ephemeral=True)
+            return
+
+        existing_id, _ = find_member_guild(interaction.guild.id, interaction.user.id)
+        if existing_id:
+            await interaction.response.send_message(
+                f"❌ Tu fais déjà partie de la guilde `{existing_id}`. Quitte-la avant d'en créer une autre.",
+                ephemeral=True,
+            )
+            return
+
+        visibility = normalize_guild_visibility(self.visibilite.value)
+        if visibility is None:
+            await interaction.response.send_message(
+                "❌ Accès invalide. Utilise exactement **publique** ou **privée**.",
+                ephemeral=True,
+            )
+            return
+
+        name = self.nom.value.strip()
+        description = self.description.value.strip() or "Aucune description."
+        guilds = get_server_guilds(interaction.guild.id)
+
+        if any(data.get("name", "").casefold() == name.casefold() for data in guilds.values()):
+            await interaction.response.send_message("❌ Une guilde porte déjà ce nom.", ephemeral=True)
+            return
+
+        guild_id = generate_guild_id(guilds)
+        guilds[guild_id] = {
+            "name": name,
+            "description": description,
+            "owner_id": interaction.user.id,
+            "icon_url": None,
+            "visibility": visibility,
+            "level": 1,
+            "xp": 0,
+            "max_members": GUILD_START_MAX_MEMBERS,
+            "rename_available": False,
+            "verified": False,
+            "members": [interaction.user.id],
+            "created_at": datetime.now(PARIS_TZ).isoformat(),
+        }
+        save_server_guilds(interaction.guild.id, guilds)
+
+        embed = build_guild_embed(guild_id, guilds[guild_id], interaction.guild)
+        embed.set_footer(text="⏳ Ta guilde a été créée et attend la vérification du staff.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class GuildInviteView(discord.ui.View):
+    def __init__(self, guild_id: str, target_user_id: int):
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+        self.target_user_id = target_user_id
+
+    @discord.ui.button(label="✅ Accepter", style=discord.ButtonStyle.success)
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.target_user_id:
+            await interaction.response.send_message("❌ Cette invitation ne t'est pas destinée.", ephemeral=True)
+            return
+
+        if interaction.guild is None:
+            await interaction.response.send_message("❌ Serveur introuvable.", ephemeral=True)
+            return
+
+        guilds = get_server_guilds(interaction.guild.id)
+        guild_data = guilds.get(self.guild_id)
+        if not guild_data:
+            await interaction.response.send_message("❌ Cette guilde n'existe plus.", ephemeral=True)
+            return
+        ensure_guild_defaults(guild_data)
+
+        if not guild_data.get("verified"):
+            await interaction.response.send_message("❌ Cette guilde n'est pas encore vérifiée par le staff.", ephemeral=True)
+            return
+
+        current_id, _ = find_member_guild(interaction.guild.id, interaction.user.id)
+        if current_id:
+            await interaction.response.send_message(
+                f"❌ Tu fais déjà partie de la guilde `{current_id}`.", ephemeral=True
+            )
+            return
+
+        max_members = guild_max_members(guild_data["level"])
+        if len(guild_data.get("members", [])) >= max_members:
+            await interaction.response.send_message("❌ Cette guilde est complète.", ephemeral=True)
+            return
+
+        guild_data.setdefault("members", []).append(interaction.user.id)
+        save_server_guilds(interaction.guild.id, guilds)
+        self.stop()
+        await interaction.response.edit_message(
+            content=f"✅ Tu as rejoint **{guild_data['name']}** !",
+            embed=None,
+            view=None,
+        )
+
+    @discord.ui.button(label="❌ Refuser", style=discord.ButtonStyle.danger)
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.target_user_id:
+            await interaction.response.send_message("❌ Cette invitation ne t'est pas destinée.", ephemeral=True)
+            return
+        self.stop()
+        await interaction.response.edit_message(content="❌ Invitation refusée.", embed=None, view=None)
+
+
+class GuildVerificationView(discord.ui.View):
+    def __init__(self, guild_id: int, pending_ids: list[str]):
+        super().__init__(timeout=300)
+        self.discord_guild_id = guild_id
+        self.pending_ids = pending_ids
+
+        for guild_id_value in pending_ids[:5]:
+            self.add_item(
+                discord.ui.Button(
+                    label=f"Valider {guild_id_value}",
+                    style=discord.ButtonStyle.success,
+                    custom_id=f"guilde_verify:{guild_id_value}",
+                )
+            )
+            self.add_item(
+                discord.ui.Button(
+                    label=f"Refuser {guild_id_value}",
+                    style=discord.ButtonStyle.danger,
+                    custom_id=f"guilde_reject:{guild_id_value}",
+                )
+            )
+
+
+async def show_guild_verification_panel(interaction: discord.Interaction):
+    guilds = get_server_guilds(interaction.guild.id)
+    pending = []
+    for guild_id_value, guild_data in guilds.items():
+        if ensure_guild_defaults(guild_data) or guild_data.get("verified") is False:
+            if not guild_data.get("verified"):
+                pending.append(guild_id_value)
+    save_server_guilds(interaction.guild.id, guilds)
+
+    if not pending:
+        await interaction.response.send_message("✅ Aucune guilde n'attend actuellement de vérification.", ephemeral=True)
+        return
+
+    lines = []
+    for guild_id_value in pending[:5]:
+        data = guilds[guild_id_value]
+        owner = interaction.guild.get_member(int(data["owner_id"]))
+        owner_text = owner.mention if owner else f"<@{data['owner_id']}>"
+        visibility = "publique" if data.get("visibility") == "public" else "privée"
+        lines.append(
+            f"**{data['name']}** — `{guild_id_value}`\n"
+            f"👑 {owner_text} • 👥 {len(data.get('members', []))}/10 • 🔐 {visibility}\n"
+            f"> {data.get('description', 'Aucune description.')[:200]}"
+        )
+
+    embed = discord.Embed(
+        title="🛡️ Vérification des guildes",
+        description="\n\n".join(lines),
+        color=discord.Color.orange(),
+    )
+    if len(pending) > 5:
+        embed.set_footer(text=f"5 premières affichées • {len(pending)} guildes en attente au total.")
+    else:
+        embed.set_footer(text=f"{len(pending)} guilde(s) en attente.")
+
+    await interaction.response.send_message(
+        embed=embed,
+        view=GuildVerificationView(interaction.guild.id, pending[:5]),
+        ephemeral=True,
+    )
+
+
+@bot.listen("on_interaction")
+async def on_guild_verification_interaction(interaction: discord.Interaction):
+    if interaction.type != discord.InteractionType.component or interaction.guild is None:
+        return
+
+    custom_id = interaction.data.get("custom_id", "")
+    if not (custom_id.startswith("guilde_verify:") or custom_id.startswith("guilde_reject:")):
+        return
+
+    if not is_staff(interaction.user):
+        await interaction.response.send_message("❌ Cette action est réservée au staff.", ephemeral=True)
+        return
+
+    action, guild_id_value = custom_id.split(":", 1)
+    guilds = get_server_guilds(interaction.guild.id)
+    guild_data = guilds.get(guild_id_value)
+    if not guild_data:
+        await interaction.response.send_message("❌ Cette guilde n'existe plus.", ephemeral=True)
+        return
+
+    if action == "guilde_verify":
+        guild_data["verified"] = True
+        save_server_guilds(interaction.guild.id, guilds)
+        await interaction.response.send_message(
+            f"✅ La guilde **{guild_data['name']}** (`{guild_id_value}`) a été vérifiée.",
+            ephemeral=True,
+        )
+    else:
+        name = guild_data.get("name", guild_id_value)
+        del guilds[guild_id_value]
+        save_server_guilds(interaction.guild.id, guilds)
+        await interaction.response.send_message(
+            f"❌ La demande de guilde **{name}** (`{guild_id_value}`) a été refusée et supprimée.",
+            ephemeral=True,
+        )
+
+
+@bot.tree.command(name="guilde", description="Gestion des guildes")
+async def guilde_root(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "🏰 Utilise une sous-commande : `/guilde create`, `/guilde info`, `/guilde invite`, `/guilde join`, `/guilde leave`, `/guilde members`, `/guilde rename`, `/guilde icon` ou `/guilde verif`.",
+        ephemeral=True,
+    )
+
+
+# Groupe réel utilisé par Discord pour les sous-commandes.
+# La commande racine ci-dessus est retirée juste après sa définition pour laisser
+# la place au groupe app_commands portant le même nom.
+bot.tree.remove_command("guilde")
+guilde_group = app_commands.Group(name="guilde", description="Gestion des guildes")
+
+
+@guilde_group.command(name="create", description="Crée une nouvelle guilde")
+async def guilde_create_cmd(interaction: discord.Interaction):
+    await interaction.response.send_modal(GuildCreateModal())
+
+
+@guilde_group.command(name="info", description="Affiche les informations d'une guilde")
+@app_commands.describe(id="ID de la guilde (optionnel si tu en fais partie)")
+async def guilde_info_cmd(interaction: discord.Interaction, id: str = None):
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ Cette commande doit être utilisée sur un serveur.", ephemeral=True)
+        return
+    guilds = get_server_guilds(interaction.guild.id)
+    if id:
+        guild_id_value = id.upper()
+        guild_data = guilds.get(guild_id_value)
+    else:
+        guild_id_value, guild_data = find_member_guild(interaction.guild.id, interaction.user.id)
+
+    if not guild_data:
+        await interaction.response.send_message("❌ Guilde introuvable. Indique un ID valide ou rejoins une guilde.", ephemeral=True)
+        return
+
+    changed = ensure_guild_defaults(guild_data)
+    if changed:
+        save_server_guilds(interaction.guild.id, guilds)
+    await interaction.response.send_message(embed=build_guild_embed(guild_id_value, guild_data, interaction.guild))
+
+
+@guilde_group.command(name="invite", description="Invite un membre dans ta guilde")
+@app_commands.describe(membre="Membre à inviter")
+async def guilde_invite_cmd(interaction: discord.Interaction, membre: discord.Member):
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ Cette commande doit être utilisée sur un serveur.", ephemeral=True)
+        return
+    guild_id_value, guild_data = find_member_guild(interaction.guild.id, interaction.user.id)
+    if not guild_data:
+        await interaction.response.send_message("❌ Tu n'es dans aucune guilde.", ephemeral=True)
+        return
+    if int(guild_data["owner_id"]) != interaction.user.id:
+        await interaction.response.send_message("❌ Seul le fondateur peut inviter des membres.", ephemeral=True)
+        return
+    if not guild_data.get("verified"):
+        await interaction.response.send_message("❌ Ta guilde doit être vérifiée par le staff avant d'inviter des membres.", ephemeral=True)
+        return
+    if membre.bot:
+        await interaction.response.send_message("❌ Tu ne peux pas inviter un bot.", ephemeral=True)
+        return
+    if membre.id == interaction.user.id:
+        await interaction.response.send_message("❌ Tu es déjà dans cette guilde.", ephemeral=True)
+        return
+    if membre.id in [int(uid) for uid in guild_data.get("members", [])]:
+        await interaction.response.send_message("❌ Ce membre est déjà dans ta guilde.", ephemeral=True)
+        return
+    other_id, _ = find_member_guild(interaction.guild.id, membre.id)
+    if other_id:
+        await interaction.response.send_message(f"❌ Ce membre est déjà dans la guilde `{other_id}`.", ephemeral=True)
+        return
+    if len(guild_data.get("members", [])) >= guild_max_members(guild_data["level"]):
+        await interaction.response.send_message("❌ Ta guilde est complète.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="🏰 Invitation à une guilde",
+        description=(
+            f"{membre.mention}, **{interaction.user.display_name}** t'invite à rejoindre "
+            f"**{guild_data['name']}** (`{guild_id_value}`).\n\n"
+            f"{guild_data.get('description', 'Aucune description.')}"
+        ),
+        color=discord.Color.blurple(),
+    )
+    await interaction.response.send_message(
+        content=membre.mention,
+        embed=embed,
+        view=GuildInviteView(guild_id_value, membre.id),
+    )
+
+
+@guilde_group.command(name="join", description="Rejoins une guilde publique avec son ID")
+@app_commands.describe(id="ID de la guilde publique")
+async def guilde_join_cmd(interaction: discord.Interaction, id: str):
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ Cette commande doit être utilisée sur un serveur.", ephemeral=True)
+        return
+    guilds = get_server_guilds(interaction.guild.id)
+    guild_id_value = id.upper()
+    guild_data = guilds.get(guild_id_value)
+    if not guild_data:
+        await interaction.response.send_message("❌ Guilde introuvable.", ephemeral=True)
+        return
+    ensure_guild_defaults(guild_data)
+    if not guild_data.get("verified"):
+        await interaction.response.send_message("❌ Cette guilde n'est pas encore vérifiée par le staff.", ephemeral=True)
+        return
+    if guild_data.get("visibility") != "public":
+        await interaction.response.send_message("❌ Cette guilde est privée : demande au fondateur de t'inviter.", ephemeral=True)
+        return
+    current_id, _ = find_member_guild(interaction.guild.id, interaction.user.id)
+    if current_id:
+        await interaction.response.send_message(f"❌ Tu fais déjà partie de la guilde `{current_id}`.", ephemeral=True)
+        return
+    if len(guild_data.get("members", [])) >= guild_max_members(guild_data["level"]):
+        await interaction.response.send_message("❌ Cette guilde est complète.", ephemeral=True)
+        return
+
+    guild_data.setdefault("members", []).append(interaction.user.id)
+    save_server_guilds(interaction.guild.id, guilds)
+    await interaction.response.send_message(f"✅ Tu as rejoint **{guild_data['name']}** !")
+
+
+@guilde_group.command(name="leave", description="Quitte ta guilde actuelle")
+async def guilde_leave_cmd(interaction: discord.Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ Cette commande doit être utilisée sur un serveur.", ephemeral=True)
+        return
+    guild_id_value, guild_data = find_member_guild(interaction.guild.id, interaction.user.id)
+    if not guild_data:
+        await interaction.response.send_message("❌ Tu ne fais partie d'aucune guilde.", ephemeral=True)
+        return
+    if int(guild_data["owner_id"]) == interaction.user.id:
+        await interaction.response.send_message(
+            "❌ Tu es le fondateur. Tu ne peux pas simplement quitter la guilde : utilise `/guilde delete` si tu veux la supprimer (ou transfère la propriété dans une future version).",
+            ephemeral=True,
+        )
+        return
+    guild_data["members"] = [uid for uid in guild_data.get("members", []) if int(uid) != interaction.user.id]
+    save_server_guilds(interaction.guild.id, get_server_guilds(interaction.guild.id))
+    await interaction.response.send_message(f"✅ Tu as quitté la guilde **{guild_data['name']}**.", ephemeral=True)
+
+
+@guilde_group.command(name="members", description="Affiche les membres de ta guilde")
+async def guilde_members_cmd(interaction: discord.Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ Cette commande doit être utilisée sur un serveur.", ephemeral=True)
+        return
+    guild_id_value, guild_data = find_member_guild(interaction.guild.id, interaction.user.id)
+    if not guild_data:
+        await interaction.response.send_message("❌ Tu ne fais partie d'aucune guilde.", ephemeral=True)
+        return
+
+    lines = []
+    for uid in guild_data.get("members", []):
+        member = interaction.guild.get_member(int(uid))
+        if int(uid) == int(guild_data["owner_id"]):
+            role = "👑 Fondateur"
+        else:
+            role = "👤 Membre"
+        lines.append(f"{role} — {member.mention if member else f'<@{uid}>'}")
+
+    embed = discord.Embed(
+        title=f"👥 Membres — {guild_data['name']}",
+        description="\n".join(lines) or "Aucun membre.",
+        color=discord.Color.blurple(),
+    )
+    embed.set_footer(text=f"Guilde {guild_id_value} • {len(lines)}/{guild_max_members(guild_data['level'])}")
+    await interaction.response.send_message(embed=embed)
+
+
+@guilde_group.command(name="rename", description="Change le nom de ta guilde (niveau 5, une seule fois)")
+@app_commands.describe(nom="Nouveau nom de la guilde")
+async def guilde_rename_cmd(interaction: discord.Interaction, nom: str):
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ Cette commande doit être utilisée sur un serveur.", ephemeral=True)
+        return
+    guild_id_value, guild_data = find_member_guild(interaction.guild.id, interaction.user.id)
+    if not guild_data:
+        await interaction.response.send_message("❌ Tu ne fais partie d'aucune guilde.", ephemeral=True)
+        return
+    if int(guild_data["owner_id"]) != interaction.user.id:
+        await interaction.response.send_message("❌ Seul le fondateur peut changer le nom.", ephemeral=True)
+        return
+    if guild_data["level"] < GUILD_RENAME_LEVEL:
+        await interaction.response.send_message("❌ Le changement de nom se débloque au niveau 5.", ephemeral=True)
+        return
+    if not guild_data.get("rename_available", False):
+        await interaction.response.send_message("❌ Le changement de nom unique a déjà été utilisé.", ephemeral=True)
+        return
+
+    nouveau_nom = nom.strip()
+    if len(nouveau_nom) < 2 or len(nouveau_nom) > 40:
+        await interaction.response.send_message("❌ Le nom doit contenir entre 2 et 40 caractères.", ephemeral=True)
+        return
+    guilds = get_server_guilds(interaction.guild.id)
+    if any(key != guild_id_value and data.get("name", "").casefold() == nouveau_nom.casefold() for key, data in guilds.items()):
+        await interaction.response.send_message("❌ Une autre guilde porte déjà ce nom.", ephemeral=True)
+        return
+
+    ancien_nom = guild_data["name"]
+    guild_data["name"] = nouveau_nom
+    guild_data["rename_available"] = False
+    save_server_guilds(interaction.guild.id, guilds)
+    await interaction.response.send_message(
+        f"✅ La guilde `{ancien_nom}` s'appelle maintenant **{nouveau_nom}**.\nLe changement de nom unique a été consommé.",
+        ephemeral=True,
+    )
+
+
+@guilde_group.command(name="icon", description="Définit l'icône personnalisée de ta guilde")
+@app_commands.describe(url="URL directe de l'image")
+async def guilde_icon_cmd(interaction: discord.Interaction, url: str):
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ Cette commande doit être utilisée sur un serveur.", ephemeral=True)
+        return
+    guild_id_value, guild_data = find_member_guild(interaction.guild.id, interaction.user.id)
+    if not guild_data:
+        await interaction.response.send_message("❌ Tu ne fais partie d'aucune guilde.", ephemeral=True)
+        return
+    if int(guild_data["owner_id"]) != interaction.user.id:
+        await interaction.response.send_message("❌ Seul le fondateur peut modifier l'icône.", ephemeral=True)
+        return
+    if guild_data["level"] < GUILD_ICON_LEVEL:
+        await interaction.response.send_message("❌ L'icône personnalisée se débloque au niveau 1.", ephemeral=True)
+        return
+    if not re.match(r"^https?://", url.strip(), re.IGNORECASE):
+        await interaction.response.send_message("❌ Fournis une URL d'image commençant par `http://` ou `https://`.", ephemeral=True)
+        return
+
+    guild_data["icon_url"] = url.strip()
+    save_server_guilds(interaction.guild.id, get_server_guilds(interaction.guild.id))
+    await interaction.response.send_message("✅ L'icône personnalisée de la guilde a été mise à jour.", ephemeral=True)
+
+
+@guilde_group.command(name="verif", description="[Staff] Affiche les guildes en attente de vérification")
+async def guilde_verif_cmd(interaction: discord.Interaction):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message("❌ Cette commande est réservée au staff.", ephemeral=True)
+        return
+    await show_guild_verification_panel(interaction)
+
+
+@guilde_group.command(name="delete", description="[Staff] Supprime une guilde avec son ID")
+@app_commands.describe(id="ID de la guilde à supprimer")
+async def guilde_delete_cmd(interaction: discord.Interaction, id: str):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message("❌ Cette commande est réservée au staff.", ephemeral=True)
+        return
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ Cette commande doit être utilisée sur un serveur.", ephemeral=True)
+        return
+
+    guilds = get_server_guilds(interaction.guild.id)
+    guild_id_value = id.upper()
+    guild_data = guilds.get(guild_id_value)
+    if not guild_data:
+        await interaction.response.send_message("❌ Guilde introuvable.", ephemeral=True)
+        return
+
+    name = guild_data.get("name", guild_id_value)
+    del guilds[guild_id_value]
+    save_server_guilds(interaction.guild.id, guilds)
+    await interaction.response.send_message(f"🗑️ La guilde **{name}** (`{guild_id_value}`) a été supprimée.", ephemeral=True)
+
+
+bot.tree.add_command(guilde_group)
+
+
 # ================================================================
 #                        +lock / +unlock
 # ================================================================
@@ -1309,17 +1970,13 @@ ANIMAUX = [
     {"nom": "9z_wl", "rarete": "Membre"},
     {"nom": "Beurre2KKhouette", "rarete": "Membre"},
     {"nom": "Slayzxx", "rarete": "Membre"},
-    {"nom": "doren99", "rarete": "Membre"},
-    {"nom": "Ryzz", "rarete": "Modérateur"},
-    {"nom": "Velvelte", "rarete": "Animateur"},
 ]
 
 RARETE_WEIGHTS = {
     "Owner": 0.5,
     "Co-Owner": 2,
     "Modérateur": 10,
-    "Animateur": 8,
-    "VIP": 20,
+    "VIP": 28,
     "Membre": 59.5,
 }
 
@@ -1327,7 +1984,6 @@ RARETE_COLORS = {
     "Owner": discord.Color.red(),
     "Co-Owner": discord.Color.orange(),
     "Modérateur": discord.Color.purple(),
-    "Animateur": discord.Color.green(),
     "VIP": discord.Color.gold(),
     "Membre": discord.Color.light_grey(),
 }
@@ -2305,102 +2961,6 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
     except discord.HTTPException as e:
         print(f"[soutiens] ⚠️ Erreur HTTP lors de l'attribution du rôle à {after} : {e}")
  
-# ================================================================
-#           SYSTÈME DE BIENVENUE (/welcome config)
-# ================================================================
-#
-# Système optionnel : /welcome config (staff) choisit le salon d'annonce et
-# personnalise le message envoyé à chaque nouvel arrivant. Le message peut
-# utiliser les variables suivantes :
-#   {membre}          -> mentionne le nouveau membre
-#   {pseudo}          -> pseudo du nouveau membre (sans mention)
-#   {serveur}         -> nom du serveur
-#   {nombre_membres}  -> nombre de membres sur le serveur après son arrivée
-#
-# Le système est désactivé tant qu'aucun salon n'a été configuré.
- 
-WELCOME_DEFAULT_MESSAGE = "👋 Bienvenue {membre} sur **{serveur}** ! Tu es notre {nombre_membres}e membres."
- 
- 
-def get_welcome_config(guild_id: int) -> dict:
-    return config.get(str(guild_id), {}).get("welcome_config", {})
- 
- 
-def build_welcome_text(template: str, member: discord.Member) -> str:
-    return (
-        template.replace("{membre}", member.mention)
-        .replace("{pseudo}", member.display_name)
-        .replace("{serveur}", member.guild.name)
-        .replace("{nombre_membres}", str(member.guild.member_count))
-    )
- 
- 
-welcome_group = app_commands.Group(name="welcome", description="Configuration du message de bienvenue (staff)")
- 
- 
-@welcome_group.command(name="config", description="[Staff] Active/configure le message de bienvenue")
-@app_commands.describe(
-    salon="Salon où sera envoyé le message de bienvenue",
-    message=(
-        "Message personnalisé — variables dispo : {membre} {pseudo} {serveur} {nombre_membres}"
-    ),
-)
-async def welcome_config_cmd(interaction: discord.Interaction, salon: discord.TextChannel, message: str = None):
-    if not is_staff(interaction.user):
-        await interaction.response.send_message(
-            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
-        )
-        return
- 
-    guild_conf = config.setdefault(str(interaction.guild.id), {})
-    welcome_conf = guild_conf.setdefault("welcome_config", {})
-    welcome_conf["channel_id"] = salon.id
-    if message:
-        welcome_conf["message"] = message
-    save_config(config)
- 
-    apercu = build_welcome_text(welcome_conf.get("message") or WELCOME_DEFAULT_MESSAGE, interaction.user)
-    await interaction.response.send_message(
-        f"✅ Message de bienvenue activé dans {salon.mention} !\n\n**Aperçu :**\n{apercu}",
-        ephemeral=True,
-    )
- 
- 
-@welcome_group.command(name="desactiver", description="[Staff] Désactive le message de bienvenue")
-async def welcome_desactiver_cmd(interaction: discord.Interaction):
-    if not is_staff(interaction.user):
-        await interaction.response.send_message(
-            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
-        )
-        return
- 
-    guild_conf = config.setdefault(str(interaction.guild.id), {})
-    if "welcome_config" in guild_conf:
-        del guild_conf["welcome_config"]
-        save_config(config)
- 
-    await interaction.response.send_message("✅ Message de bienvenue désactivé sur ce serveur.", ephemeral=True)
- 
- 
-bot.tree.add_command(welcome_group)
- 
- 
-async def send_welcome_message(member: discord.Member) -> None:
-    welcome_conf = get_welcome_config(member.guild.id)
-    channel_id = welcome_conf.get("channel_id")
-    if not channel_id:
-        return
- 
-    channel = member.guild.get_channel(channel_id)
-    if channel is None:
-        return
- 
-    template = welcome_conf.get("message") or WELCOME_DEFAULT_MESSAGE
-    texte = build_welcome_text(template, member)
-    try:
-        await channel.send(texte)
-    except discord.HTTPException:
-        pass
  
 # ================================================================
 #                    SYSTÈME ANTI-FLOOD
@@ -3382,6 +3942,55 @@ async def check_spam(message: discord.Message) -> None:
 #                          on_message
 # ================================================================
  
+
+
+async def add_guild_message_xp(message: discord.Message) -> None:
+    """Ajoute de l'XP à la guilde du membre avec un cooldown anti-farm."""
+    if message.guild is None or message.author.bot:
+        return
+
+    guild_id_value, guild_data = find_member_guild(message.guild.id, message.author.id)
+    if not guild_data:
+        return
+
+    # Une guilde non vérifiée peut être créée, mais son activité ne progresse pas
+    # tant qu'elle n'a pas été validée par le staff.
+    if not guild_data.get("verified"):
+        return
+
+    now = datetime.now(PARIS_TZ)
+    server_cooldowns = GUILD_XP_COOLDOWNS.setdefault(message.guild.id, {})
+    last_gain = server_cooldowns.get(message.author.id)
+    if last_gain and (now - last_gain).total_seconds() < GUILD_XP_COOLDOWN_SECONDS:
+        return
+
+    server_cooldowns[message.author.id] = now
+    old_level = int(guild_data.get("level", 1))
+    old_max = guild_max_members(old_level)
+    guild_data["xp"] = int(guild_data.get("xp", 0)) + GUILD_XP_PER_MESSAGE
+    new_level = guild_level_from_xp(guild_data["xp"])
+    guild_data["level"] = new_level
+    guild_data["max_members"] = guild_max_members(new_level)
+    if new_level >= GUILD_RENAME_LEVEL and old_level < GUILD_RENAME_LEVEL:
+        guild_data["rename_available"] = True
+    save_server_guilds(message.guild.id, get_server_guilds(message.guild.id))
+
+    if new_level > old_level:
+        # Notification discrète uniquement lors d'un niveau gagné.
+        try:
+            await message.channel.send(
+                f"🎉 **{guild_data['name']}** passe au **niveau {new_level}** !",
+                delete_after=8,
+            )
+            if new_level == GUILD_CAPACITY_LEVEL and old_max < GUILD_MAX_MEMBERS:
+                await message.channel.send(
+                    f"👥 La capacité de **{guild_data['name']}** passe maintenant à **{GUILD_MAX_MEMBERS} membres** !",
+                    delete_after=8,
+                )
+        except discord.HTTPException:
+            pass
+
+
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
@@ -3390,6 +3999,7 @@ async def on_message(message: discord.Message):
     if message.guild is not None:
         await check_spam(message)
         await check_flood(message)
+        await add_guild_message_xp(message)
         # Comptage pour l'Élu de la semaine
         bump_weekly_count(message.guild.id, message.author.id)
  
