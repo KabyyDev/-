@@ -7,7 +7,6 @@ import calendar
 import asyncio
 import aiohttp
 import discord
-import yt_dlp
 from datetime import datetime, timedelta, time as dt_time
 from zoneinfo import ZoneInfo
 from discord import app_commands
@@ -42,7 +41,6 @@ TIKTOK_CHECK_INTERVAL_MINUTES = 10       # Fréquence de vérification des nouve
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
-intents.voice_states = True
 intents.presences = True
  
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
@@ -96,8 +94,7 @@ NORMAL_COMMANDS = [
     ("/animal classement", "Affiche le classement des meilleurs chasseurs d'animaux."),
     ("/pet inventory", "Affiche ton inventaire d'animaux capturés."),
     ("/pet trade [@membre]", "Propose un échange d'animal avec un autre membre."),
-    ("/music play [recherche]", "Joue une musique (lien YouTube ou recherche) dans ton salon vocal."),
-    ("/music pause / resume / skip / stop / queue", "Contrôle la lecture de musique."),
+    ("/report envoyer [@membre] [raison]", "Signale discrètement un membre au staff."),
 ]
  
 STAFF_COMMANDS = [
@@ -124,6 +121,8 @@ STAFF_COMMANDS = [
     ("+remove role @membre @role", "Retire un rôle à un membre."),
     ("+lock", "Verrouille le salon : seul le rôle Staff peut y écrire."),
     ("+unlock", "Déverrouille le salon."),
+    ("/report config [salon]", "Définit le salon privé où arrivent les signalements (staff)."),
+    ("/report historique [@membre]", "Affiche les signalements reçus contre un membre (staff)."),
 ]
 
 
@@ -2288,10 +2287,18 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
     try:
         if correspond and not a_deja_le_role:
             await after.add_roles(role, reason="Statut de soutien détecté")
+            print(f"[soutiens] Rôle '{role.name}' attribué à {after} sur {guild.name}.")
         elif not correspond and a_deja_le_role:
             await after.remove_roles(role, reason="Statut de soutien retiré")
-    except (discord.Forbidden, discord.HTTPException):
-        pass
+            print(f"[soutiens] Rôle '{role.name}' retiré à {after} sur {guild.name}.")
+    except discord.Forbidden:
+        print(
+            f"[soutiens] ❌ Permission refusée pour attribuer/retirer '{role.name}' à {after} sur {guild.name}. "
+            "Vérifie que le rôle du bot est placé AU-DESSUS du rôle de soutien dans Paramètres du serveur → Rôles, "
+            "et que le bot a bien la permission 'Gérer les rôles'."
+        )
+    except discord.HTTPException as e:
+        print(f"[soutiens] ⚠️ Erreur HTTP lors de l'attribution du rôle à {after} : {e}")
  
  
 # ================================================================
@@ -2342,214 +2349,6 @@ async def check_flood(message: discord.Message) -> None:
         except discord.HTTPException:
             pass
  
- 
-# ================================================================
-#        SYSTÈME DE MUSIQUE BASIQUE (/music play, pause, skip...)
-# ================================================================
-#
-# ⚠️ Dépendances supplémentaires nécessaires (pas incluses par défaut) :
-#   pip install -U "discord.py[voice]" yt-dlp PyNaCl
-# et le binaire FFmpeg doit être installé sur la machine/le conteneur qui
-# héberge le bot (ex: `apt-get install -y ffmpeg` dans le Dockerfile).
-# Sans ffmpeg installé sur le système, la lecture échouera au runtime.
-
-YTDL_FORMAT_OPTIONS = {
-    "format": "bestaudio/best",
-    "noplaylist": True,
-    "nocheckcertificate": True,
-    "ignoreerrors": False,
-    "logtostderr": False,
-    "quiet": True,
-    "no_warnings": True,
-    "default_search": "ytsearch",
-    "source_address": "0.0.0.0",
-}
-
-FFMPEG_OPTIONS = {
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-    "options": "-vn",
-}
-
-music_queues: dict[int, list] = {}  # guild_id -> liste de pistes {"title", "url", "webpage_url", "requester"}
-
-
-def get_music_queue(guild_id: int) -> list:
-    return music_queues.setdefault(guild_id, [])
-
-
-async def get_track_info(recherche: str) -> dict:
-    """Extrait les infos (titre + URL de flux direct) via yt-dlp. Bloquant, donc
-    exécuté dans un executor pour ne pas geler la boucle d'événements."""
-    loop = asyncio.get_event_loop()
-
-    def _extract():
-        with yt_dlp.YoutubeDL(YTDL_FORMAT_OPTIONS) as ytdl:
-            return ytdl.extract_info(recherche, download=False)
-
-    data = await loop.run_in_executor(None, _extract)
-    if data and "entries" in data:
-        data = data["entries"][0]
-
-    return {
-        "title": data.get("title") if data else None,
-        "url": data.get("url") if data else None,
-        "webpage_url": data.get("webpage_url") if data else None,
-    }
-
-
-async def start_playback(guild: discord.Guild, channel: discord.abc.Messageable) -> None:
-    """Joue la prochaine piste de la file si rien n'est déjà en cours de lecture."""
-    voice_client = guild.voice_client
-    if voice_client is None:
-        return
-    if voice_client.is_playing() or voice_client.is_paused():
-        return
-
-    queue = get_music_queue(guild.id)
-    if not queue:
-        return
-
-    track = queue.pop(0)
-
-    try:
-        source = discord.FFmpegPCMAudio(track["url"], **FFMPEG_OPTIONS)
-    except Exception as e:
-        try:
-            await channel.send(f"❌ Impossible de lire **{track['title']}** : {e}")
-        except discord.HTTPException:
-            pass
-        await start_playback(guild, channel)
-        return
-
-    def _after_playing(error):
-        if error:
-            print(f"⚠️ Erreur de lecture musique : {error}")
-        fut = asyncio.run_coroutine_threadsafe(start_playback(guild, channel), bot.loop)
-        try:
-            fut.result()
-        except Exception as e:
-            print(f"⚠️ Erreur après lecture musique : {e}")
-
-    voice_client.play(source, after=_after_playing)
-    try:
-        await channel.send(f"🎶 Lecture en cours : **{track['title']}** (demandé par {track['requester'].mention})")
-    except discord.HTTPException:
-        pass
-
-
-music_group = app_commands.Group(name="music", description="Commandes de musique")
-
-
-@music_group.command(name="play", description="Joue une musique (lien YouTube ou recherche) dans ton salon vocal")
-@app_commands.describe(recherche="Lien YouTube ou termes de recherche")
-async def music_play_cmd(interaction: discord.Interaction, recherche: str):
-    if interaction.user.voice is None or interaction.user.voice.channel is None:
-        await interaction.response.send_message(
-            "❌ Tu dois être dans un salon vocal pour utiliser cette commande.", ephemeral=True
-        )
-        return
-
-    await interaction.response.defer()
-
-    voice_channel = interaction.user.voice.channel
-    voice_client = interaction.guild.voice_client
-
-    try:
-        if voice_client is None:
-            voice_client = await voice_channel.connect()
-        elif voice_client.channel != voice_channel:
-            await voice_client.move_to(voice_channel)
-    except discord.ClientException:
-        await interaction.followup.send("❌ Impossible de rejoindre le salon vocal.")
-        return
-
-    try:
-        info = await get_track_info(recherche)
-    except Exception as e:
-        await interaction.followup.send(f"❌ Impossible de trouver/lire cette musique : {e}")
-        return
-
-    if not info.get("url"):
-        await interaction.followup.send("❌ Aucun résultat trouvé.")
-        return
-
-    track = {
-        "title": info["title"] or recherche,
-        "url": info["url"],
-        "webpage_url": info.get("webpage_url"),
-        "requester": interaction.user,
-    }
-    queue = get_music_queue(interaction.guild.id)
-    queue.append(track)
-
-    if voice_client.is_playing() or voice_client.is_paused():
-        await interaction.followup.send(f"➕ Ajouté à la file d'attente : **{track['title']}**")
-    else:
-        await interaction.followup.send(f"🔎 Trouvé : **{track['title']}** — lancement de la lecture...")
-        await start_playback(interaction.guild, interaction.channel)
-
-
-@music_group.command(name="pause", description="Met la musique en pause")
-async def music_pause_cmd(interaction: discord.Interaction):
-    vc = interaction.guild.voice_client
-    if vc is None or not vc.is_playing():
-        await interaction.response.send_message("❌ Aucune musique n'est en cours de lecture.", ephemeral=True)
-        return
-    vc.pause()
-    await interaction.response.send_message("⏸️ Musique mise en pause.")
-
-
-@music_group.command(name="resume", description="Reprend la lecture après une pause")
-async def music_resume_cmd(interaction: discord.Interaction):
-    vc = interaction.guild.voice_client
-    if vc is None or not vc.is_paused():
-        await interaction.response.send_message("❌ La musique n'est pas en pause.", ephemeral=True)
-        return
-    vc.resume()
-    await interaction.response.send_message("▶️ Lecture reprise.")
-
-
-@music_group.command(name="skip", description="Passe à la musique suivante dans la file")
-async def music_skip_cmd(interaction: discord.Interaction):
-    vc = interaction.guild.voice_client
-    if vc is None or (not vc.is_playing() and not vc.is_paused()):
-        await interaction.response.send_message("❌ Aucune musique n'est en cours de lecture.", ephemeral=True)
-        return
-    vc.stop()  # déclenche le callback "after", qui enchaîne automatiquement sur la piste suivante
-    await interaction.response.send_message("⏭️ Musique passée.")
-
-
-@music_group.command(name="stop", description="Arrête la musique, vide la file et quitte le salon vocal")
-async def music_stop_cmd(interaction: discord.Interaction):
-    vc = interaction.guild.voice_client
-    if vc is None:
-        await interaction.response.send_message("❌ Je ne suis dans aucun salon vocal.", ephemeral=True)
-        return
-    get_music_queue(interaction.guild.id).clear()
-    vc.stop()
-    await vc.disconnect()
-    await interaction.response.send_message("⏹️ Musique arrêtée, file vidée, salon vocal quitté.")
-
-
-@music_group.command(name="queue", description="Affiche la file d'attente actuelle")
-async def music_queue_cmd(interaction: discord.Interaction):
-    queue = get_music_queue(interaction.guild.id)
-    vc = interaction.guild.voice_client
-
-    lignes = []
-    if vc and (vc.is_playing() or vc.is_paused()):
-        lignes.append("🎶 Une musique est actuellement en cours de lecture.")
-    if not queue:
-        lignes.append("La file d'attente est vide.")
-    else:
-        for i, track in enumerate(queue[:10], start=1):
-            lignes.append(f"{i}. **{track['title']}** — demandé par {track['requester'].mention}")
-
-    embed = discord.Embed(title="🎶 File d'attente", description="\n".join(lignes), color=discord.Color.blurple())
-    await interaction.response.send_message(embed=embed)
-
-
-bot.tree.add_command(music_group)
  
  
 # ================================================================
@@ -3235,6 +3034,150 @@ async def unmute_command(ctx: commands.Context, membre: discord.Member = None):
         return
  
     await ctx.send(f"🔊 {membre.mention} n'est plus mute.")
+ 
+ 
+# ================================================================
+#              SYSTÈME DE SIGNALEMENT (/report)
+# ================================================================
+#
+# Permet à n'importe quel membre de signaler discrètement un autre membre
+# au staff. Le signalement part directement dans un salon privé (visible
+# uniquement par le staff), jamais publiquement dans le salon où la commande
+# est utilisée.
+
+def get_report_channel_id(guild_id: int):
+    return config.get(str(guild_id), {}).get("report_config", {}).get("channel_id")
+
+
+def add_report(guild_id: int, reporter_id: int, target_id: int, raison: str) -> None:
+    guild_conf = config.setdefault(str(guild_id), {})
+    reports = guild_conf.setdefault("reports", {})
+    target_reports = reports.setdefault(str(target_id), [])
+    target_reports.append({
+        "reporter_id": str(reporter_id),
+        "reason": raison,
+        "date": datetime.utcnow().isoformat(),
+    })
+    save_config(config)
+
+
+def get_reports(guild_id: int, target_id: int) -> list:
+    return config.get(str(guild_id), {}).get("reports", {}).get(str(target_id), [])
+
+
+report_group = app_commands.Group(name="report", description="Signale un membre au staff (discrètement)")
+
+
+@report_group.command(name="config", description="[Staff] Définit le salon où arrivent les signalements")
+@app_commands.describe(salon="Salon privé (visible seulement par le staff) où seront envoyés les signalements")
+async def report_config_cmd(interaction: discord.Interaction, salon: discord.TextChannel):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message(
+            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+
+    guild_conf = config.setdefault(str(interaction.guild.id), {})
+    report_conf = guild_conf.setdefault("report_config", {})
+    report_conf["channel_id"] = salon.id
+    save_config(config)
+
+    await interaction.response.send_message(
+        f"✅ Les signalements seront désormais envoyés dans {salon.mention}. "
+        "Pense à vérifier que ce salon n'est visible que par le staff !",
+        ephemeral=True,
+    )
+
+
+@report_group.command(name="envoyer", description="Signale un membre au staff (discret, personne d'autre ne le voit)")
+@app_commands.describe(membre="Le membre à signaler", raison="Explique la raison du signalement")
+async def report_envoyer_cmd(interaction: discord.Interaction, membre: discord.Member, raison: str):
+    if membre.id == interaction.user.id:
+        await interaction.response.send_message("❌ Tu ne peux pas te signaler toi-même.", ephemeral=True)
+        return
+    if membre.bot:
+        await interaction.response.send_message("❌ Tu ne peux pas signaler un bot.", ephemeral=True)
+        return
+
+    channel_id = get_report_channel_id(interaction.guild.id)
+    if not channel_id:
+        await interaction.response.send_message(
+            "❌ Le système de signalement n'est pas configuré sur ce serveur. Un membre du staff doit "
+            "utiliser `/report config` d'abord.",
+            ephemeral=True,
+        )
+        return
+
+    channel = interaction.guild.get_channel(channel_id)
+    if channel is None:
+        await interaction.response.send_message(
+            "❌ Le salon de signalement configuré est introuvable. Contacte le staff.", ephemeral=True
+        )
+        return
+
+    add_report(interaction.guild.id, interaction.user.id, membre.id, raison)
+
+    embed = discord.Embed(
+        title="🚩 Nouveau signalement",
+        color=discord.Color.orange(),
+        timestamp=datetime.utcnow(),
+    )
+    embed.add_field(name="Membre signalé", value=f"{membre.mention} ({membre})", inline=False)
+    embed.add_field(name="Signalé par", value=f"{interaction.user.mention} ({interaction.user})", inline=False)
+    embed.add_field(name="Raison", value=raison, inline=False)
+    embed.add_field(name="Salon d'origine", value=interaction.channel.mention if interaction.channel else "—", inline=False)
+
+    try:
+        await channel.send(embed=embed)
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "❌ Je n'ai pas la permission d'écrire dans le salon de signalement configuré.", ephemeral=True
+        )
+        return
+    except discord.HTTPException:
+        await interaction.response.send_message("❌ Erreur lors de l'envoi du signalement.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        "✅ Ton signalement a bien été envoyé au staff. Merci de nous aider à garder le serveur sain !",
+        ephemeral=True,
+    )
+
+
+@report_group.command(name="historique", description="[Staff] Affiche les signalements reçus contre un membre")
+@app_commands.describe(membre="Le membre dont tu veux voir l'historique des signalements")
+async def report_historique_cmd(interaction: discord.Interaction, membre: discord.Member):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message(
+            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+
+    reports = get_reports(interaction.guild.id, membre.id)
+    if not reports:
+        embed = discord.Embed(
+            title=f"🚩 Signalements de {membre.display_name}",
+            description="Aucun signalement.",
+            color=discord.Color.green(),
+        )
+    else:
+        lignes = []
+        for i, r in enumerate(reports, start=1):
+            date = r["date"][:10]
+            reporter = interaction.guild.get_member(int(r["reporter_id"]))
+            nom_reporter = reporter.mention if reporter else f"<@{r['reporter_id']}>"
+            lignes.append(f"**#{i}** — {r['reason']} *(signalé par {nom_reporter}, le {date})*")
+        embed = discord.Embed(
+            title=f"🚩 Signalements de {membre.display_name}",
+            description="\n".join(lignes),
+            color=discord.Color.orange(),
+        )
+    embed.set_footer(text=f"{len(reports)} signalement(s)")
+    embed.set_thumbnail(url=membre.display_avatar.url)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+bot.tree.add_command(report_group)
  
  
 # ---------------- +add role / +remove role ----------------
