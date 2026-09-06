@@ -23,7 +23,7 @@ STAFF_ROLE_NAME = "Ping staff"          # Nom exact du rôle staff sur ton serve
 STATS_CATEGORY_NAME = "🧽 SERVEUR STATS"
 STATS_UPDATE_INTERVAL_MINUTES = 10      # Discord limite les renommages de salons (~2 / 10 min)
 CONFIG_FILE = "config.json"             # Stockage persistant des rôles autorisés à valider
-DEV_GUILD_ID = 1537139988448153640      # ID de ton serveur, pour une synchro instantanée des slash commands
+DEV_GUILD_ID = 1539254757951021147      # ID de ton serveur, pour une synchro instantanée des slash commands
  
 # ---- Élu de la semaine ----
 ELU_ROLE_NAME = "👑 Élu de la semaine"
@@ -103,6 +103,7 @@ NORMAL_COMMANDS = [
     ("/guilde members", "Affiche les membres de ta guilde."),
     ("/guilde rename [nom]", "Change le nom de ta guilde au niveau 5, une seule fois."),
     ("/guilde icon [url]", "Définit l’icône personnalisée de ta guilde (niveau 1)."),
+    ("/guilde classement", "Affiche le classement des guildes (option reset pour les admins)."),
 ]
  
 STAFF_COMMANDS = [
@@ -133,6 +134,7 @@ STAFF_COMMANDS = [
     ("/report historique [@membre]", "Affiche les signalements reçus contre un membre (staff)."),
     ("/guilde verif", "Affiche les guildes en attente de vérification."),
     ("/guilde delete [id]", "Supprime une guilde par son ID."),
+    ("/guilde classement reset:True", "[Admin] Réinitialise le classement des guildes (sans toucher aux niveaux)."),
 ]
 
 
@@ -231,6 +233,15 @@ async def cmds_command(ctx: commands.Context, sous_commande: str = None):
 # La création est soumise à validation du staff. Les guildes publiques peuvent
 # ensuite être rejointes avec /guilde join <id>, tandis que les guildes privées
 # restent accessibles uniquement sur invitation.
+#
+# Le fondateur d'une guilde reçoit automatiquement le rôle "Chef de guilde"
+# (créé automatiquement s'il n'existe pas encore). Le rôle est retiré si la
+# guilde est supprimée ou si sa création est refusée par le staff.
+#
+# Un classement des guildes (/guilde classement) est calculé à partir d'un
+# compteur de points dédié (classement_points), totalement indépendant de
+# l'XP/niveau. Un administrateur peut réinitialiser ce classement
+# (/guilde classement reset:True) sans jamais affecter les niveaux des guildes.
 
 GUILD_START_MAX_MEMBERS = 10
 GUILD_MAX_MEMBERS = 20
@@ -241,6 +252,7 @@ GUILD_RENAME_LEVEL = 5
 GUILD_ICON_LEVEL = 1
 GUILD_CAPACITY_LEVEL = 10
 GUILD_ID_LENGTH = 6
+CHEF_GUILDE_ROLE_NAME = "Chef de guilde"
 
 # Cooldown XP en mémoire : {guild_id: {user_id: datetime}}
 GUILD_XP_COOLDOWNS: dict[int, dict[int, datetime]] = {}
@@ -290,6 +302,20 @@ def guild_max_members(level: int) -> int:
     return GUILD_MAX_MEMBERS if level >= GUILD_CAPACITY_LEVEL else GUILD_START_MAX_MEMBERS
 
 
+async def get_or_create_chef_guilde_role(guild: discord.Guild) -> discord.Role | None:
+    role = discord.utils.get(guild.roles, name=CHEF_GUILDE_ROLE_NAME)
+    if role is None:
+        try:
+            role = await guild.create_role(
+                name=CHEF_GUILDE_ROLE_NAME,
+                color=discord.Color.dark_teal(),
+                reason="Création automatique du rôle Chef de guilde",
+            )
+        except discord.HTTPException:
+            role = None
+    return role
+
+
 def ensure_guild_defaults(guild_data: dict) -> bool:
     """Mise à niveau des anciennes entrées de config si nécessaire."""
     changed = False
@@ -300,6 +326,7 @@ def ensure_guild_defaults(guild_data: dict) -> bool:
         "visibility": "private",
         "level": 1,
         "xp": 0,
+        "classement_points": 0,
         "max_members": GUILD_START_MAX_MEMBERS,
         "rename_available": False,
         "verified": False,
@@ -426,6 +453,7 @@ class GuildCreateModal(discord.ui.Modal, title="Créer une guilde"):
             "visibility": visibility,
             "level": 1,
             "xp": 0,
+            "classement_points": 0,
             "max_members": GUILD_START_MAX_MEMBERS,
             "rename_available": False,
             "verified": False,
@@ -433,6 +461,14 @@ class GuildCreateModal(discord.ui.Modal, title="Créer une guilde"):
             "created_at": datetime.now(PARIS_TZ).isoformat(),
         }
         save_server_guilds(interaction.guild.id, guilds)
+
+        # Attribue le rôle Chef de guilde au fondateur (créé automatiquement si besoin).
+        role = await get_or_create_chef_guilde_role(interaction.guild)
+        if role:
+            try:
+                await interaction.user.add_roles(role, reason=f"Fondateur de la guilde {name}")
+            except discord.HTTPException:
+                pass
 
         embed = build_guild_embed(guild_id, guilds[guild_id], interaction.guild)
         embed.set_footer(text="⏳ Ta guilde a été créée et attend la vérification du staff.")
@@ -590,8 +626,19 @@ async def on_guild_verification_interaction(interaction: discord.Interaction):
         )
     else:
         name = guild_data.get("name", guild_id_value)
+        owner_id = guild_data.get("owner_id")
         del guilds[guild_id_value]
         save_server_guilds(interaction.guild.id, guilds)
+
+        if owner_id:
+            owner_member = interaction.guild.get_member(int(owner_id))
+            role = discord.utils.get(interaction.guild.roles, name=CHEF_GUILDE_ROLE_NAME)
+            if owner_member and role and role in owner_member.roles:
+                try:
+                    await owner_member.remove_roles(role, reason=f"Demande de guilde {name} refusée")
+                except discord.HTTPException:
+                    pass
+
         await interaction.response.send_message(
             f"❌ La demande de guilde **{name}** (`{guild_id_value}`) a été refusée et supprimée.",
             ephemeral=True,
@@ -601,7 +648,8 @@ async def on_guild_verification_interaction(interaction: discord.Interaction):
 @bot.tree.command(name="guilde", description="Gestion des guildes")
 async def guilde_root(interaction: discord.Interaction):
     await interaction.response.send_message(
-        "🏰 Utilise une sous-commande : `/guilde create`, `/guilde info`, `/guilde invite`, `/guilde join`, `/guilde leave`, `/guilde members`, `/guilde rename`, `/guilde icon` ou `/guilde verif`.",
+        "🏰 Utilise une sous-commande : `/guilde create`, `/guilde info`, `/guilde invite`, `/guilde join`, "
+        "`/guilde leave`, `/guilde members`, `/guilde rename`, `/guilde icon`, `/guilde classement` ou `/guilde verif`.",
         ephemeral=True,
     )
 
@@ -834,6 +882,68 @@ async def guilde_icon_cmd(interaction: discord.Interaction, url: str):
     await interaction.response.send_message("✅ L'icône personnalisée de la guilde a été mise à jour.", ephemeral=True)
 
 
+@guilde_group.command(name="classement", description="Affiche le classement des guildes (option admin : reset)")
+@app_commands.describe(reset="[Admin] Réinitialise le classement des guildes SANS toucher aux niveaux/XP")
+async def guilde_classement_cmd(interaction: discord.Interaction, reset: bool = False):
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ Cette commande doit être utilisée sur un serveur.", ephemeral=True)
+        return
+
+    guilds = get_server_guilds(interaction.guild.id)
+
+    if reset:
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message(
+                "❌ Seul un membre avec la permission **Administrateur** peut réinitialiser le classement.",
+                ephemeral=True,
+            )
+            return
+        for guild_data in guilds.values():
+            guild_data["classement_points"] = 0
+        save_server_guilds(interaction.guild.id, guilds)
+        await interaction.response.send_message(
+            "✅ Le classement des guildes a été réinitialisé.\n"
+            "ℹ️ Les niveaux et l'XP des guildes n'ont **pas** été affectés.",
+            ephemeral=True,
+        )
+        return
+
+    changed = False
+    for guild_data in guilds.values():
+        if ensure_guild_defaults(guild_data):
+            changed = True
+    if changed:
+        save_server_guilds(interaction.guild.id, guilds)
+
+    classees = [(gid, data) for gid, data in guilds.items() if data.get("verified")]
+    if not classees:
+        await interaction.response.send_message("Aucune guilde vérifiée pour le moment.", ephemeral=True)
+        return
+
+    classees.sort(
+        key=lambda item: (
+            -int(item[1].get("classement_points", 0)),
+            -int(item[1].get("level", 1)),
+            item[1].get("name", ""),
+        )
+    )
+
+    medailles = ["🥇", "🥈", "🥉"]
+    lignes = []
+    for i, (gid, data) in enumerate(classees[:10], start=1):
+        prefix = medailles[i - 1] if i <= 3 else f"**#{i}**"
+        points = int(data.get("classement_points", 0))
+        lignes.append(f"{prefix} **{data['name']}** (`{gid}`) — {points} pts • Niveau {data.get('level', 1)}")
+
+    embed = discord.Embed(
+        title="🏆 Classement des guildes",
+        description="\n".join(lignes),
+        color=discord.Color.gold(),
+    )
+    embed.set_footer(text="Basé sur l'activité des membres • Réinitialisable par un admin (n'affecte pas les niveaux)")
+    await interaction.response.send_message(embed=embed)
+
+
 @guilde_group.command(name="verif", description="[Staff] Affiche les guildes en attente de vérification")
 async def guilde_verif_cmd(interaction: discord.Interaction):
     if not is_staff(interaction.user):
@@ -860,8 +970,19 @@ async def guilde_delete_cmd(interaction: discord.Interaction, id: str):
         return
 
     name = guild_data.get("name", guild_id_value)
+    owner_id = guild_data.get("owner_id")
     del guilds[guild_id_value]
     save_server_guilds(interaction.guild.id, guilds)
+
+    if owner_id:
+        owner_member = interaction.guild.get_member(int(owner_id))
+        role = discord.utils.get(interaction.guild.roles, name=CHEF_GUILDE_ROLE_NAME)
+        if owner_member and role and role in owner_member.roles:
+            try:
+                await owner_member.remove_roles(role, reason=f"Suppression de la guilde {name}")
+            except discord.HTTPException:
+                pass
+
     await interaction.response.send_message(f"🗑️ La guilde **{name}** (`{guild_id_value}`) a été supprimée.", ephemeral=True)
 
 
@@ -3145,6 +3266,15 @@ UPDATE_LOGS = [
             "à une heure aléatoire. Premier arrivé, premier servi ! Voir sa collection avec `/animal collection`."
         ),
     },
+    {
+        "titre": "🏰 Classement des guildes & rôle Chef de guilde",
+        "description": (
+            "`/guilde classement` affiche le classement des guildes les plus actives "
+            "(un administrateur peut le réinitialiser avec `/guilde classement reset:True`, "
+            "sans jamais affecter les niveaux/XP des guildes).\n"
+            "Le fondateur d'une guilde reçoit désormais automatiquement le rôle **Chef de guilde**."
+        ),
+    },
 ]
 
 
@@ -3945,7 +4075,9 @@ async def check_spam(message: discord.Message) -> None:
 
 
 async def add_guild_message_xp(message: discord.Message) -> None:
-    """Ajoute de l'XP à la guilde du membre avec un cooldown anti-farm."""
+    """Ajoute de l'XP (et des points de classement) à la guilde du membre avec
+    un cooldown anti-farm. classement_points est un compteur totalement
+    indépendant de xp/level, réinitialisable via /guilde classement reset."""
     if message.guild is None or message.author.bot:
         return
 
@@ -3968,6 +4100,7 @@ async def add_guild_message_xp(message: discord.Message) -> None:
     old_level = int(guild_data.get("level", 1))
     old_max = guild_max_members(old_level)
     guild_data["xp"] = int(guild_data.get("xp", 0)) + GUILD_XP_PER_MESSAGE
+    guild_data["classement_points"] = int(guild_data.get("classement_points", 0)) + GUILD_XP_PER_MESSAGE
     new_level = guild_level_from_xp(guild_data["xp"])
     guild_data["level"] = new_level
     guild_data["max_members"] = guild_max_members(new_level)
