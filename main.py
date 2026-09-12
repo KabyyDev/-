@@ -4,6 +4,7 @@ import json
 import uuid
 import random
 import calendar
+import itertools
 import asyncio
 import aiohttp
 import discord
@@ -104,6 +105,9 @@ NORMAL_COMMANDS = [
     ("/guilde rename [nom]", "Change le nom de ta guilde au niveau 5, une seule fois."),
     ("/guilde icon [url]", "Définit l’icône personnalisée de ta guilde (niveau 1)."),
     ("/guilde classement", "Affiche le classement des guildes (option reset pour les admins)."),
+    ("/guilde boutique", "Affiche la boutique de badges de guilde."),
+    ("/guilde acheter [badge]", "Achète un badge pour ta guilde (fondateur, avec l'argent de la guilde)."),
+    ("/guilde quetes", "Affiche les 2 quêtes de guilde actives et les dernières complétées."),
 ]
  
 STAFF_COMMANDS = [
@@ -135,6 +139,7 @@ STAFF_COMMANDS = [
     ("/guilde verif", "Affiche les guildes en attente de vérification."),
     ("/guilde delete [id]", "Supprime une guilde par son ID."),
     ("/guilde classement reset:True", "[Admin] Réinitialise le classement des guildes (sans toucher aux niveaux)."),
+    ("/guilde quetesconfig [salon]", "Définit le salon d'annonce des quêtes de guilde."),
 ]
 
 
@@ -245,7 +250,7 @@ async def cmds_command(ctx: commands.Context, sous_commande: str = None):
 
 GUILD_START_MAX_MEMBERS = 10
 GUILD_MAX_MEMBERS = 20
-GUILD_MAX_LEVEL = 10
+GUILD_MAX_LEVEL = 40                    # Niveau maximum d'une guilde
 GUILD_XP_PER_MESSAGE = 10
 GUILD_XP_COOLDOWN_SECONDS = 60
 GUILD_RENAME_LEVEL = 5
@@ -253,6 +258,147 @@ GUILD_ICON_LEVEL = 1
 GUILD_CAPACITY_LEVEL = 10
 GUILD_ID_LENGTH = 6
 CHEF_GUILDE_ROLE_NAME = "Chef de guilde"
+
+# ---- Classement des guildes ----
+# Pour rendre le classement plus difficile à grimper que la simple XP/niveau,
+# les points de classement ne sont accordés qu'une fois sur
+# GUILD_CLASSEMENT_HARD_INTERVAL gains d'XP valides (au lieu de systématiquement).
+GUILD_CLASSEMENT_HARD_INTERVAL = 3
+GUILD_CLASSEMENT_POINTS_PER_TICK = GUILD_XP_PER_MESSAGE
+
+# ---- Paliers spéciaux de guilde ----
+GUILD_HIDE_LEVEL_UNLOCK = 30      # Niveau à partir duquel le fondateur peut masquer le niveau affiché
+GUILD_EXCLUSIVE_ROLE_LEVEL = 10   # Niveau qui débloque un rôle exclusif aux membres (nom de la guilde)
+GUILD_EXCLUSIVE_CHANNEL_LEVEL = 20  # Niveau qui débloque un salon privé réservé aux membres
+
+# ---- Boutique de guilde (argent gagné en montant de niveau) ----
+GUILD_MONEY_PER_LEVEL = 20  # 1 niveau passé = 20$ ajoutés à la trésorerie de la guilde
+
+GUILD_BADGES = {
+    "nul": {"name": "🗑️ La plus nul des guildes", "price": 1},
+    "epic": {"name": "⚔️ Guilde Epic", "price": 100},
+    "legendaire": {"name": "🏆 Guilde Légendaire", "price": 130},
+}
+
+# ---- Quêtes de guilde (thème animé) ----
+# À tout moment, 2 quêtes sont actives sur le serveur, tirées au hasard dans ce
+# catalogue. TOUTES les guildes du serveur peuvent tenter de les remplir, mais
+# dès qu'une guilde en complète une, celle-ci est retirée pour les autres et
+# remplacée par une nouvelle quête piochée dans le catalogue.
+QUETES_CATALOGUE = {
+    "op_nakama": {
+        "titre": "🏴‍☠️ Nakama for Life",
+        "anime": "One Piece",
+        "description": "Rassembler un véritable équipage : atteindre **10 membres** dans la guilde.",
+        "type": "membres",
+        "objectif": 10,
+        "recompense_argent": 100,
+    },
+    "naruto_volonte": {
+        "titre": "🍥 La Volonté du Feu",
+        "anime": "Naruto",
+        "description": "Prouver la force de la guilde : atteindre le **niveau 10**.",
+        "type": "niveau",
+        "objectif": 10,
+        "recompense_argent": 150,
+    },
+    "dbz_super_saiyan": {
+        "titre": "🐉 Plus fort que Freezer",
+        "anime": "Dragon Ball Z",
+        "description": "Dépasser ses limites : atteindre le **niveau 20**.",
+        "type": "niveau",
+        "objectif": 20,
+        "recompense_argent": 300,
+    },
+    "aot_chasseurs": {
+        "titre": "🗡️ Bataillon d'exploration",
+        "anime": "Attack on Titan",
+        "description": "S'entraîner sans relâche : cumuler **5 000 XP** de guilde.",
+        "type": "xp",
+        "objectif": 5000,
+        "recompense_argent": 200,
+    },
+    "demon_slayer_pilier": {
+        "titre": "👹 Devenir un Pilier",
+        "anime": "Demon Slayer",
+        "description": "Repousser encore plus loin l'entraînement : cumuler **10 000 XP** de guilde.",
+        "type": "xp",
+        "objectif": 10000,
+        "recompense_argent": 400,
+    },
+    "mha_plus_ultra": {
+        "titre": "💥 Plus Ultra !",
+        "anime": "My Hero Academia",
+        "description": "Dépasser ses propres records : atteindre le **niveau 25**.",
+        "type": "niveau",
+        "objectif": 25,
+        "recompense_argent": 350,
+    },
+    "death_note_justice": {
+        "titre": "📓 Justice Divine",
+        "anime": "Death Note",
+        "description": "Grimper dans les hautes sphères : cumuler **3 000 points de classement**.",
+        "type": "classement_points",
+        "objectif": 3000,
+        "recompense_points": 150,
+    },
+    "jjk_domaine": {
+        "titre": "🔮 Extension de Domaine",
+        "anime": "Jujutsu Kaisen",
+        "description": "Maîtriser une puissance ultime : atteindre le **niveau 30**.",
+        "type": "niveau",
+        "objectif": 30,
+        "recompense_argent": 500,
+    },
+    "hxh_licence": {
+        "titre": "🃏 Licence de Hunter",
+        "anime": "Hunter x Hunter",
+        "description": "Constituer une grande guilde : atteindre **20 membres**.",
+        "type": "membres",
+        "objectif": 20,
+        "recompense_argent": 300,
+    },
+    "bleach_bankai": {
+        "titre": "⚡ Bankai !",
+        "anime": "Bleach",
+        "description": "Libérer toute sa puissance : atteindre le **niveau 35**.",
+        "type": "niveau",
+        "objectif": 35,
+        "recompense_argent": 600,
+    },
+    "fma_echange": {
+        "titre": "⚗️ Échange Équivalent",
+        "anime": "Fullmetal Alchemist",
+        "description": "Investir dans la guilde : acheter **2 badges** dans la boutique.",
+        "type": "badges",
+        "objectif": 2,
+        "recompense_argent": 100,
+    },
+    "tokyo_ghoul_chasse": {
+        "titre": "👁️ Instinct de Chasseur",
+        "anime": "Tokyo Ghoul",
+        "description": "Traquer les créatures sauvages : cumuler **500 captures d'animaux** parmi les membres.",
+        "type": "captures",
+        "objectif": 500,
+        "recompense_argent": 250,
+    },
+    "chainsaw_man_diable": {
+        "titre": "🪚 Le Diable Tronçonneuse",
+        "anime": "Chainsaw Man",
+        "description": "Atteindre la puissance maximale : atteindre le **niveau 40** (niveau max).",
+        "type": "niveau",
+        "objectif": 40,
+        "recompense_argent": 1000,
+    },
+    "spy_family_mission": {
+        "titre": "🕵️ Mission Forger",
+        "anime": "Spy x Family",
+        "description": "Bâtir un trésor de guilde solide : cumuler **300$ gagnés au total**.",
+        "type": "argent_total",
+        "objectif": 300,
+        "recompense_points": 100,
+    },
+}
 
 # Cooldown XP en mémoire : {guild_id: {user_id: datetime}}
 GUILD_XP_COOLDOWNS: dict[int, dict[int, datetime]] = {}
@@ -316,6 +462,90 @@ async def get_or_create_chef_guilde_role(guild: discord.Guild) -> discord.Role |
     return role
 
 
+async def ensure_guild_exclusive_role(guild: discord.Guild, guild_data: dict) -> discord.Role | None:
+    """Crée (si besoin, au niveau 10) le rôle exclusif aux membres de la guilde,
+    portant le nom de la guilde, et l'attribue à tous les membres actuels."""
+    role_id = guild_data.get("exclusive_role_id")
+    role = guild.get_role(role_id) if role_id else None
+
+    if role is None:
+        try:
+            role = await guild.create_role(
+                name=guild_data["name"][:100],
+                color=discord.Color.blurple(),
+                mentionable=True,
+                reason=f"Rôle exclusif de la guilde {guild_data['name']} (niveau {GUILD_EXCLUSIVE_ROLE_LEVEL})",
+            )
+        except discord.HTTPException:
+            return None
+        guild_data["exclusive_role_id"] = role.id
+
+    for uid in guild_data.get("members", []):
+        member = guild.get_member(int(uid))
+        if member and role not in member.roles:
+            try:
+                await member.add_roles(role, reason="Rôle exclusif de guilde")
+            except discord.HTTPException:
+                pass
+
+    return role
+
+
+async def ensure_guild_exclusive_channel(guild: discord.Guild, guild_data: dict) -> discord.TextChannel | None:
+    """Crée (si besoin, au niveau 20) un salon textuel privé réservé aux membres
+    de la guilde, visible uniquement via le rôle exclusif de la guilde."""
+    channel_id = guild_data.get("guild_channel_id")
+    channel = guild.get_channel(channel_id) if channel_id else None
+    if channel is not None:
+        return channel
+
+    role = None
+    role_id = guild_data.get("exclusive_role_id")
+    if role_id:
+        role = guild.get_role(role_id)
+    if role is None:
+        # Le salon nécessite le rôle exclusif : on le crée s'il n'existe pas encore.
+        role = await ensure_guild_exclusive_role(guild, guild_data)
+    if role is None:
+        return None
+
+    category = discord.utils.get(guild.categories, name="🏰 GUILDES")
+    if category is None:
+        try:
+            category = await guild.create_category("🏰 GUILDES")
+        except discord.HTTPException:
+            category = None
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+    }
+
+    slug = "".join(c if c.isalnum() else "-" for c in guild_data["name"].lower()).strip("-")[:80] or "guilde"
+    try:
+        channel = await guild.create_text_channel(
+            f"🏰-{slug}",
+            category=category,
+            overwrites=overwrites,
+            topic=f"Salon privé de la guilde {guild_data['name']} (débloqué au niveau {GUILD_EXCLUSIVE_CHANNEL_LEVEL}).",
+            reason=f"Salon exclusif de la guilde {guild_data['name']} (niveau {GUILD_EXCLUSIVE_CHANNEL_LEVEL})",
+        )
+    except discord.HTTPException:
+        return None
+
+    guild_data["guild_channel_id"] = channel.id
+    try:
+        await channel.send(
+            f"🏰 Bienvenue dans le salon privé de **{guild_data['name']}** ! "
+            "Ce salon n'est visible que par les membres de la guilde."
+        )
+    except discord.HTTPException:
+        pass
+
+    return channel
+
+
 def ensure_guild_defaults(guild_data: dict) -> bool:
     """Mise à niveau des anciennes entrées de config si nécessaire."""
     changed = False
@@ -327,6 +557,13 @@ def ensure_guild_defaults(guild_data: dict) -> bool:
         "level": 1,
         "xp": 0,
         "classement_points": 0,
+        "classement_msg_counter": 0,
+        "hide_level": False,
+        "exclusive_role_id": None,
+        "guild_channel_id": None,
+        "argent": 0,
+        "argent_total": 0,
+        "badges": [],
         "max_members": GUILD_START_MAX_MEMBERS,
         "rename_available": False,
         "verified": False,
@@ -380,10 +617,18 @@ def build_guild_embed(guild_id: str, guild_data: dict, discord_guild: discord.Gu
 
     embed.add_field(name="🆔 ID", value=f"`{guild_id}`", inline=True)
     embed.add_field(name="👑 Fondateur", value=owner_text, inline=True)
-    embed.add_field(name="📈 Niveau", value=f"Niveau **{level}** • {progress}", inline=True)
+    if not guild_data.get("hide_level"):
+        embed.add_field(name="📈 Niveau", value=f"Niveau **{level}** • {progress}", inline=True)
     embed.add_field(name="👥 Membres", value=f"**{len(members)}/{max_members}**", inline=True)
     embed.add_field(name="🔐 Accès", value=visibility, inline=True)
     embed.add_field(name="📋 Statut", value=status, inline=True)
+    embed.add_field(name="🏆 Points de classement", value=f"**{int(guild_data.get('classement_points', 0))}** pts", inline=True)
+    embed.add_field(name="💰 Argent", value=f"**{int(guild_data.get('argent', 0))}$**", inline=True)
+
+    badges = guild_data.get("badges", [])
+    if badges:
+        noms_badges = [GUILD_BADGES[b]["name"] for b in badges if b in GUILD_BADGES]
+        embed.add_field(name="🎖️ Badges", value="\n".join(noms_badges) or "Aucun", inline=False)
 
     if level >= GUILD_RENAME_LEVEL:
         rename_status = "Disponible" if guild_data.get("rename_available", False) else "Déjà utilisé"
@@ -393,6 +638,132 @@ def build_guild_embed(guild_id: str, guild_data: dict, discord_guild: discord.Gu
 
     return embed
 
+
+def get_quest_value(discord_guild_id: int, guild_data: dict, quest: dict) -> float:
+    """Calcule la progression actuelle d'une guilde sur une quête donnée."""
+    type_quete = quest["type"]
+    if type_quete == "membres":
+        return len(guild_data.get("members", []))
+    if type_quete == "niveau":
+        return int(guild_data.get("level", 1))
+    if type_quete == "xp":
+        return int(guild_data.get("xp", 0))
+    if type_quete == "classement_points":
+        return int(guild_data.get("classement_points", 0))
+    if type_quete == "argent_total":
+        return int(guild_data.get("argent_total", 0))
+    if type_quete == "badges":
+        return len(guild_data.get("badges", []))
+    if type_quete == "captures":
+        collections = config.get(str(discord_guild_id), {}).get("animal_collections", {})
+        return sum(len(collections.get(str(uid), [])) for uid in guild_data.get("members", []))
+    return 0
+
+
+def _quete_pool_disponible(actives: list, terminees: dict) -> list:
+    return [qid for qid in QUETES_CATALOGUE if qid not in actives and qid not in terminees]
+
+
+async def check_and_complete_quetes(guild: discord.Guild) -> None:
+    """Initialise les quêtes actives si besoin, puis vérifie si l'une des guildes
+    vérifiées du serveur a rempli l'objectif d'une des 2 quêtes actives. La
+    première guilde qui y parvient la remporte : la quête est alors retirée
+    (les autres guildes ne peuvent plus la valider) et remplacée par une
+    nouvelle quête piochée dans le catalogue."""
+    guild_conf = config.setdefault(str(guild.id), {})
+    quete_state = guild_conf.setdefault("quetes", {})
+    actives = quete_state.setdefault("actives", [])
+    terminees = quete_state.setdefault("terminees", {})
+
+    changed = False
+    while len(actives) < 2:
+        dispo = _quete_pool_disponible(actives, terminees)
+        if not dispo:
+            break
+        actives.append(random.choice(dispo))
+        changed = True
+
+    if not actives:
+        if changed:
+            save_config(config)
+        return
+
+    server_guilds = get_server_guilds(guild.id)
+    guildes_verifiees = [(gid, data) for gid, data in server_guilds.items() if data.get("verified")]
+
+    canal_id = guild_conf.get("quetes_channel_id")
+    channel = guild.get_channel(canal_id) if canal_id else guild.system_channel
+
+    for quest_id in list(actives):
+        quest = QUETES_CATALOGUE.get(quest_id)
+        if quest is None:
+            actives.remove(quest_id)
+            changed = True
+            continue
+
+        for guild_id_value, guild_data in guildes_verifiees:
+            ensure_guild_defaults(guild_data)
+            valeur = get_quest_value(guild.id, guild_data, quest)
+            if valeur < quest["objectif"]:
+                continue
+
+            # Quête remplie : première guilde à y arriver, les autres ne pourront plus la faire.
+            recompense_argent = quest.get("recompense_argent", 0)
+            recompense_points = quest.get("recompense_points", 0)
+            if recompense_argent:
+                guild_data["argent"] = int(guild_data.get("argent", 0)) + recompense_argent
+                guild_data["argent_total"] = int(guild_data.get("argent_total", 0)) + recompense_argent
+            if recompense_points:
+                guild_data["classement_points"] = int(guild_data.get("classement_points", 0)) + recompense_points
+
+            actives.remove(quest_id)
+            terminees[quest_id] = {
+                "guild_id": guild_id_value,
+                "guild_name": guild_data.get("name", guild_id_value),
+                "date": datetime.now(PARIS_TZ).isoformat(),
+            }
+            changed = True
+
+            if channel:
+                recompense_txt = []
+                if recompense_argent:
+                    recompense_txt.append(f"{recompense_argent}$")
+                if recompense_points:
+                    recompense_txt.append(f"{recompense_points} pts de classement")
+                try:
+                    await channel.send(
+                        f"🎌 Quête complétée ! **{quest['titre']}** *({quest['anime']})* a été remportée par "
+                        f"**{guild_data.get('name')}** !\n🎁 Récompense : {' + '.join(recompense_txt) or 'aucune'}\n"
+                        "⚠️ Cette quête n'est plus disponible pour les autres guildes."
+                    )
+                except discord.HTTPException:
+                    pass
+
+            dispo = _quete_pool_disponible(actives, terminees)
+            if dispo:
+                nouvelle_id = random.choice(dispo)
+                actives.append(nouvelle_id)
+                if channel:
+                    nq = QUETES_CATALOGUE[nouvelle_id]
+                    try:
+                        await channel.send(
+                            f"🆕 Nouvelle quête disponible pour toutes les guildes : "
+                            f"**{nq['titre']}** *({nq['anime']})* — {nq['description']}"
+                        )
+                    except discord.HTTPException:
+                        pass
+            elif channel:
+                try:
+                    await channel.send("🏁 Toutes les quêtes de guilde ont désormais été complétées sur ce serveur !")
+                except discord.HTTPException:
+                    pass
+
+            # On ne traite qu'une seule victoire par quête et par passage.
+            break
+
+    if changed:
+        save_server_guilds(guild.id, server_guilds)
+        save_config(config)
 
 class GuildCreateModal(discord.ui.Modal, title="Créer une guilde"):
     nom = discord.ui.TextInput(
@@ -516,12 +887,27 @@ class GuildInviteView(discord.ui.View):
 
         guild_data.setdefault("members", []).append(interaction.user.id)
         save_server_guilds(interaction.guild.id, guilds)
+
+        exclusive_role_id = guild_data.get("exclusive_role_id")
+        if exclusive_role_id:
+            role = interaction.guild.get_role(exclusive_role_id)
+            if role:
+                try:
+                    await interaction.user.add_roles(role, reason="Rejoint la guilde")
+                except discord.HTTPException:
+                    pass
+
         self.stop()
         await interaction.response.edit_message(
             content=f"✅ Tu as rejoint **{guild_data['name']}** !",
             embed=None,
             view=None,
         )
+
+        try:
+            await check_and_complete_quetes(interaction.guild)
+        except discord.HTTPException:
+            pass
 
     @discord.ui.button(label="❌ Refuser", style=discord.ButtonStyle.danger)
     async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -649,7 +1035,8 @@ async def on_guild_verification_interaction(interaction: discord.Interaction):
 async def guilde_root(interaction: discord.Interaction):
     await interaction.response.send_message(
         "🏰 Utilise une sous-commande : `/guilde create`, `/guilde info`, `/guilde invite`, `/guilde join`, "
-        "`/guilde leave`, `/guilde members`, `/guilde rename`, `/guilde icon`, `/guilde classement` ou `/guilde verif`.",
+        "`/guilde leave`, `/guilde members`, `/guilde rename`, `/guilde icon`, `/guilde classement`, "
+        "`/guilde boutique`, `/guilde acheter`, `/guilde quetes` ou `/guilde verif`.",
         ephemeral=True,
     )
 
@@ -767,7 +1154,22 @@ async def guilde_join_cmd(interaction: discord.Interaction, id: str):
 
     guild_data.setdefault("members", []).append(interaction.user.id)
     save_server_guilds(interaction.guild.id, guilds)
+
+    exclusive_role_id = guild_data.get("exclusive_role_id")
+    if exclusive_role_id:
+        role = interaction.guild.get_role(exclusive_role_id)
+        if role:
+            try:
+                await interaction.user.add_roles(role, reason="Rejoint la guilde")
+            except discord.HTTPException:
+                pass
+
     await interaction.response.send_message(f"✅ Tu as rejoint **{guild_data['name']}** !")
+
+    try:
+        await check_and_complete_quetes(interaction.guild)
+    except discord.HTTPException:
+        pass
 
 
 @guilde_group.command(name="leave", description="Quitte ta guilde actuelle")
@@ -787,6 +1189,16 @@ async def guilde_leave_cmd(interaction: discord.Interaction):
         return
     guild_data["members"] = [uid for uid in guild_data.get("members", []) if int(uid) != interaction.user.id]
     save_server_guilds(interaction.guild.id, get_server_guilds(interaction.guild.id))
+
+    exclusive_role_id = guild_data.get("exclusive_role_id")
+    if exclusive_role_id:
+        role = interaction.guild.get_role(exclusive_role_id)
+        if role and role in interaction.user.roles:
+            try:
+                await interaction.user.remove_roles(role, reason="A quitté la guilde")
+            except discord.HTTPException:
+                pass
+
     await interaction.response.send_message(f"✅ Tu as quitté la guilde **{guild_data['name']}**.", ephemeral=True)
 
 
@@ -942,6 +1354,158 @@ async def guilde_classement_cmd(interaction: discord.Interaction, reset: bool = 
     )
     embed.set_footer(text="Basé sur l'activité des membres • Réinitialisable par un admin (n'affecte pas les niveaux)")
     await interaction.response.send_message(embed=embed)
+
+
+@guilde_group.command(name="boutique", description="Affiche la boutique de badges de guilde")
+async def guilde_boutique_cmd(interaction: discord.Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ Cette commande doit être utilisée sur un serveur.", ephemeral=True)
+        return
+
+    _, guild_data = find_member_guild(interaction.guild.id, interaction.user.id)
+    argent = int(guild_data.get("argent", 0)) if guild_data else None
+    badges_possedes = guild_data.get("badges", []) if guild_data else []
+
+    lignes = []
+    for cle, info in GUILD_BADGES.items():
+        statut = "✅ Déjà possédé" if cle in badges_possedes else f"{info['price']}$"
+        lignes.append(f"**{info['name']}** — {statut}")
+
+    embed = discord.Embed(
+        title="🛒 Boutique de badges de guilde",
+        description="\n".join(lignes),
+        color=discord.Color.blurple(),
+    )
+    if guild_data is not None:
+        embed.set_footer(text=f"💰 Trésorerie de {guild_data['name']} : {argent}$ • Achat via /guilde acheter (fondateur uniquement)")
+    else:
+        embed.set_footer(text="Rejoins ou crée une guilde pour pouvoir acheter des badges.")
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@guilde_group.command(name="acheter", description="[Fondateur] Achète un badge dans la boutique pour ta guilde")
+@app_commands.describe(badge="Badge à acheter")
+@app_commands.choices(badge=[
+    app_commands.Choice(name=f"{info['name']} — {info['price']}$", value=cle)
+    for cle, info in GUILD_BADGES.items()
+])
+async def guilde_acheter_cmd(interaction: discord.Interaction, badge: app_commands.Choice[str]):
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ Cette commande doit être utilisée sur un serveur.", ephemeral=True)
+        return
+
+    guild_id_value, guild_data = find_member_guild(interaction.guild.id, interaction.user.id)
+    if not guild_data:
+        await interaction.response.send_message("❌ Tu ne fais partie d'aucune guilde.", ephemeral=True)
+        return
+    if int(guild_data["owner_id"]) != interaction.user.id:
+        await interaction.response.send_message("❌ Seul le fondateur peut acheter des badges pour la guilde.", ephemeral=True)
+        return
+
+    cle_badge = badge.value
+    info_badge = GUILD_BADGES.get(cle_badge)
+    if info_badge is None:
+        await interaction.response.send_message("❌ Badge introuvable.", ephemeral=True)
+        return
+
+    badges_possedes = guild_data.setdefault("badges", [])
+    if cle_badge in badges_possedes:
+        await interaction.response.send_message(
+            f"⚠️ Ta guilde possède déjà le badge **{info_badge['name']}**.", ephemeral=True
+        )
+        return
+
+    argent = int(guild_data.get("argent", 0))
+    if argent < info_badge["price"]:
+        await interaction.response.send_message(
+            f"❌ Trésorerie insuffisante : il te faut **{info_badge['price']}$** mais ta guilde n'a que **{argent}$**.",
+            ephemeral=True,
+        )
+        return
+
+    guild_data["argent"] = argent - info_badge["price"]
+    badges_possedes.append(cle_badge)
+    save_server_guilds(interaction.guild.id, get_server_guilds(interaction.guild.id))
+
+    await interaction.response.send_message(
+        f"✅ Ta guilde a acheté le badge **{info_badge['name']}** pour **{info_badge['price']}$** !\n"
+        f"💰 Trésorerie restante : **{guild_data['argent']}$**",
+    )
+
+    try:
+        await check_and_complete_quetes(interaction.guild)
+    except discord.HTTPException:
+        pass
+
+
+@guilde_group.command(name="quetes", description="Affiche les quêtes de guilde actives et déjà complétées")
+async def guilde_quetes_cmd(interaction: discord.Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ Cette commande doit être utilisée sur un serveur.", ephemeral=True)
+        return
+
+    await check_and_complete_quetes(interaction.guild)
+
+    state = config.get(str(interaction.guild.id), {}).get("quetes", {})
+    actives = state.get("actives", [])
+    terminees = state.get("terminees", {})
+
+    embed = discord.Embed(
+        title="🎌 Quêtes de guilde",
+        description="2 quêtes actives à la fois. La première guilde qui remplit l'objectif la remporte "
+        "et les autres guildes ne peuvent plus la valider.",
+        color=discord.Color.purple(),
+    )
+
+    if actives:
+        for qid in actives:
+            q = QUETES_CATALOGUE.get(qid)
+            if not q:
+                continue
+            recompense = []
+            if q.get("recompense_argent"):
+                recompense.append(f"{q['recompense_argent']}$")
+            if q.get("recompense_points"):
+                recompense.append(f"{q['recompense_points']} pts de classement")
+            embed.add_field(
+                name=f"{q['titre']} — {q['anime']}",
+                value=f"{q['description']}\n🎁 Récompense : {' + '.join(recompense) or 'aucune'}",
+                inline=False,
+            )
+    else:
+        embed.add_field(name="🟢 Quêtes en cours", value="Aucune quête active pour le moment.", inline=False)
+
+    if terminees:
+        dernieres = list(terminees.items())[-8:]
+        lignes = []
+        for qid, info in dernieres:
+            q = QUETES_CATALOGUE.get(qid, {})
+            lignes.append(f"✅ **{q.get('titre', qid)}** — remportée par **{info['guild_name']}**")
+        embed.add_field(name="🏁 Dernières quêtes complétées", value="\n".join(lignes), inline=False)
+
+    embed.set_footer(text=f"{len(terminees)}/{len(QUETES_CATALOGUE)} quêtes complétées au total sur ce serveur")
+    await interaction.response.send_message(embed=embed)
+
+
+@guilde_group.command(name="quetesconfig", description="[Staff] Définit le salon d'annonce des quêtes de guilde")
+@app_commands.describe(salon="Salon où seront annoncées les quêtes complétées et les nouvelles quêtes")
+async def guilde_quetesconfig_cmd(interaction: discord.Interaction, salon: discord.TextChannel):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message("❌ Cette commande est réservée au staff.", ephemeral=True)
+        return
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ Cette commande doit être utilisée sur un serveur.", ephemeral=True)
+        return
+
+    guild_conf = config.setdefault(str(interaction.guild.id), {})
+    guild_conf["quetes_channel_id"] = salon.id
+    save_config(config)
+
+    await interaction.response.send_message(
+        f"✅ Les quêtes de guilde (complétions et nouvelles quêtes) seront désormais annoncées dans {salon.mention}.",
+        ephemeral=True,
+    )
 
 
 @guilde_group.command(name="verif", description="[Staff] Affiche les guildes en attente de vérification")
@@ -2232,6 +2796,12 @@ class AnimalCaptureView(discord.ui.View):
         self.stop()
         await interaction.response.edit_message(embed=embed, view=self)
 
+        if interaction.guild is not None:
+            try:
+                await check_and_complete_quetes(interaction.guild)
+            except discord.HTTPException:
+                pass
+
     async def on_timeout(self):
         if self.captured or self.message is None:
             return
@@ -2287,6 +2857,25 @@ async def check_animal_spawns():
 
 @check_animal_spawns.before_loop
 async def before_check_animal_spawns():
+    await bot.wait_until_ready()
+
+
+# ---- Filet de sécurité pour les quêtes de guilde ----
+# Les quêtes sont normalement vérifiées juste après chaque action pertinente
+# (message, achat de badge, capture, arrivée d'un membre), mais cette boucle
+# passe aussi régulièrement pour rattraper tout cas manqué (redémarrage du
+# bot, guilde vérifiée après-coup par le staff, etc.).
+@tasks.loop(minutes=2)
+async def check_quetes_loop():
+    for guild in bot.guilds:
+        try:
+            await check_and_complete_quetes(guild)
+        except Exception as e:
+            print(f"⚠️ Erreur lors de la vérification des quêtes sur {guild.name} : {e}")
+
+
+@check_quetes_loop.before_loop
+async def before_check_quetes_loop():
     await bot.wait_until_ready()
 
 
@@ -3275,6 +3864,24 @@ UPDATE_LOGS = [
             "Le fondateur d'une guilde reçoit désormais automatiquement le rôle **Chef de guilde**."
         ),
     },
+    {
+        "titre": "🛒 Boutique de guilde",
+        "description": (
+            "Chaque niveau passé rapporte désormais **20$** à la trésorerie de la guilde.\n"
+            "`/guilde boutique` affiche les badges disponibles à l'achat, "
+            "`/guilde acheter` (fondateur) permet de les acquérir avec l'argent de la guilde."
+        ),
+    },
+    {
+        "titre": "🎌 Quêtes de guilde",
+        "description": (
+            "2 quêtes inspirées d'animés (One Piece, Naruto, Attack on Titan, Demon Slayer...) "
+            "sont actives en permanence pour toutes les guildes du serveur.\n"
+            "La première guilde qui remplit l'objectif remporte la récompense — les autres ne "
+            "peuvent alors plus la valider, et une nouvelle quête la remplace aussitôt.\n"
+            "`/guilde quetes` affiche les quêtes en cours et l'historique des dernières complétées."
+        ),
+    },
 ]
 
 
@@ -4100,7 +4707,14 @@ async def add_guild_message_xp(message: discord.Message) -> None:
     old_level = int(guild_data.get("level", 1))
     old_max = guild_max_members(old_level)
     guild_data["xp"] = int(guild_data.get("xp", 0)) + GUILD_XP_PER_MESSAGE
-    guild_data["classement_points"] = int(guild_data.get("classement_points", 0)) + GUILD_XP_PER_MESSAGE
+
+    # Points de classement : volontairement plus durs à obtenir que l'XP/niveau.
+    # Un seul gain sur GUILD_CLASSEMENT_HARD_INTERVAL messages valides rapporte des points.
+    guild_data["classement_msg_counter"] = int(guild_data.get("classement_msg_counter", 0)) + 1
+    if guild_data["classement_msg_counter"] >= GUILD_CLASSEMENT_HARD_INTERVAL:
+        guild_data["classement_msg_counter"] = 0
+        guild_data["classement_points"] = int(guild_data.get("classement_points", 0)) + GUILD_CLASSEMENT_POINTS_PER_TICK
+
     new_level = guild_level_from_xp(guild_data["xp"])
     guild_data["level"] = new_level
     guild_data["max_members"] = guild_max_members(new_level)
@@ -4109,10 +4723,16 @@ async def add_guild_message_xp(message: discord.Message) -> None:
     save_server_guilds(message.guild.id, get_server_guilds(message.guild.id))
 
     if new_level > old_level:
+        # La guilde gagne de l'argent pour chaque niveau passé (utilisable en boutique).
+        gain_argent = (new_level - old_level) * GUILD_MONEY_PER_LEVEL
+        guild_data["argent"] = int(guild_data.get("argent", 0)) + gain_argent
+        guild_data["argent_total"] = int(guild_data.get("argent_total", 0)) + gain_argent
+        save_server_guilds(message.guild.id, get_server_guilds(message.guild.id))
+
         # Notification discrète uniquement lors d'un niveau gagné.
         try:
             await message.channel.send(
-                f"🎉 **{guild_data['name']}** passe au **niveau {new_level}** !",
+                f"🎉 **{guild_data['name']}** passe au **niveau {new_level}** ! (+{gain_argent}$ 💰)",
                 delete_after=8,
             )
             if new_level == GUILD_CAPACITY_LEVEL and old_max < GUILD_MAX_MEMBERS:
@@ -4122,6 +4742,39 @@ async def add_guild_message_xp(message: discord.Message) -> None:
                 )
         except discord.HTTPException:
             pass
+
+        # Niveau 10 : rôle exclusif aux membres, portant le nom de la guilde.
+        if new_level >= GUILD_EXCLUSIVE_ROLE_LEVEL and old_level < GUILD_EXCLUSIVE_ROLE_LEVEL:
+            role = await ensure_guild_exclusive_role(message.guild, guild_data)
+            save_server_guilds(message.guild.id, get_server_guilds(message.guild.id))
+            if role:
+                try:
+                    await message.channel.send(
+                        f"🔰 **{guild_data['name']}** débloque son rôle exclusif : {role.mention} !",
+                        delete_after=10,
+                    )
+                except discord.HTTPException:
+                    pass
+
+        # Niveau 20 : salon privé réservé aux membres de la guilde.
+        if new_level >= GUILD_EXCLUSIVE_CHANNEL_LEVEL and old_level < GUILD_EXCLUSIVE_CHANNEL_LEVEL:
+            channel = await ensure_guild_exclusive_channel(message.guild, guild_data)
+            save_server_guilds(message.guild.id, get_server_guilds(message.guild.id))
+            if channel:
+                try:
+                    await message.channel.send(
+                        f"🏰 **{guild_data['name']}** débloque son salon privé : {channel.mention} !",
+                        delete_after=10,
+                    )
+                except discord.HTTPException:
+                    pass
+
+    # Vérifie si cette progression (XP, argent, points de classement) vient de
+    # remplir l'objectif d'une des quêtes de guilde actives sur le serveur.
+    try:
+        await check_and_complete_quetes(message.guild)
+    except discord.HTTPException:
+        pass
 
 
 @bot.event
@@ -4215,7 +4868,213 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     except discord.HTTPException:
         pass
  
- 
+ # ================================================================
+#                    STATUT PERSONNALISÉ DU BOT
+# ================================================================
+
+STATUT_ROTATION_SECONDS = 15
+
+STATUTS = [
+    "Moderations | +cmds staff",
+    "👀 {membres} membres sur le serveur",
+]
+
+_cycle_statuts = itertools.cycle(STATUTS)
+
+
+@tasks.loop(seconds=STATUT_ROTATION_SECONDS)
+async def rotation_statut():
+    guild = bot.guilds[0] if bot.guilds else None
+    membres = guild.member_count if guild else "?"
+    texte = next(_cycle_statuts).format(membres=membres)
+
+    await bot.change_presence(
+        activity=discord.CustomActivity(name=texte),
+        status=discord.Status.online,
+    )
+
+
+@rotation_statut.before_loop
+async def before_rotation_statut():
+    await bot.wait_until_ready()
+
+
+# ================================================================
+#                    SYSTÈME TESTEURS
+# ================================================================
+TESTEUR_ROLE_NAME = "Testeur"
+TESTEUR_LOG_CHANNEL_NAME = "📋┃candidatures-testeurs"
+
+
+def get_testeur_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    return discord.utils.get(guild.text_channels, name=TESTEUR_LOG_CHANNEL_NAME)
+
+
+class TesteurAmbitionModal(discord.ui.Modal, title="Candidature testeur — 2/2"):
+    def __init__(self, pseudo: str, role_principal: str):
+        super().__init__()
+
+        self.pseudo = pseudo
+        self.role_principal = role_principal
+
+        self.ambition = discord.ui.TextInput(
+            label="Ton ambition pour être testeur",
+            placeholder="Explique pourquoi tu veux devenir testeur...",
+            style=discord.TextStyle.paragraph,
+            min_length=10,
+            max_length=1000,
+            required=True,
+        )
+        self.add_item(self.ambition)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        channel = get_testeur_channel(interaction.guild) if interaction.guild else None
+        if channel is None:
+            await interaction.response.send_message(
+                f"❌ Le salon **{TESTEUR_LOG_CHANNEL_NAME}** est introuvable. Préviens le staff.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title="🧪 Nouvelle candidature testeur",
+            color=discord.Color.orange(),
+            timestamp=datetime.now(PARIS_TZ),
+        )
+        embed.add_field(name="Candidat", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
+        embed.add_field(name="Pseudo Discord", value=self.pseudo, inline=True)
+        embed.add_field(name="Rôle sur le serveur principal", value=self.role_principal, inline=True)
+        embed.add_field(name="Ambition", value=self.ambition.value, inline=False)
+        embed.set_footer(text="Statut : en attente de validation")
+
+        await channel.send(embed=embed, view=TesteurValidationView(interaction.user.id))
+        await interaction.response.send_message(
+            "✅ Ta candidature a été envoyée au staff. Tu recevras une réponse après validation.",
+            ephemeral=True,
+        )
+
+
+class TesteurPseudoModal(discord.ui.Modal, title="Candidature testeur — 1/2"):
+    def __init__(self):
+        super().__init__()
+
+        self.pseudo = discord.ui.TextInput(
+            label="Pseudo Discord",
+            placeholder="Ex : MonPseudo",
+            min_length=2,
+            max_length=100,
+            required=True,
+        )
+        self.role_principal = discord.ui.TextInput(
+            label="Rôle sur le serveur principal",
+            placeholder="Ex : Membre, Modérateur, Développeur...",
+            min_length=2,
+            max_length=100,
+            required=True,
+        )
+
+        self.add_item(self.pseudo)
+        self.add_item(self.role_principal)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # Discord ne permet pas d'ouvrir directement une seconde modal
+        # depuis la soumission d'une première modal.
+        await interaction.response.send_message(
+            "Tes informations ont été enregistrées. Clique sur **Continuer** "
+            "pour remplir la deuxième partie.",
+            view=TesteurContinueView(
+                self.pseudo.value.strip(),
+                self.role_principal.value.strip(),
+            ),
+            ephemeral=True,
+        )
+
+
+class TesteurContinueView(discord.ui.View):
+    def __init__(self, pseudo: str, role_principal: str):
+        super().__init__(timeout=300)
+        self.pseudo = pseudo
+        self.role_principal = role_principal
+
+    @discord.ui.button(
+        label="Continuer",
+        emoji="➡️",
+        style=discord.ButtonStyle.primary,
+    )
+    async def continue_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await interaction.response.send_modal(
+            TesteurAmbitionModal(
+                self.pseudo,
+                self.role_principal,
+            )
+        )
+
+
+class TesteurValidationView(discord.ui.View):
+    def __init__(self, candidate_id: int):
+        super().__init__(timeout=None)
+        self.candidate_id = candidate_id
+
+    async def _check_staff(self, interaction: discord.Interaction) -> bool:
+        if not isinstance(interaction.user, discord.Member) or not is_staff(interaction.user):
+            await interaction.response.send_message("❌ Cette action est réservée au staff.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="✅ Accepter", style=discord.ButtonStyle.success, custom_id="testeur_accept")
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_staff(interaction):
+            return
+        role = discord.utils.get(interaction.guild.roles, name=TESTEUR_ROLE_NAME)
+        if role is None:
+            try:
+                role = await interaction.guild.create_role(name=TESTEUR_ROLE_NAME, reason="Rôle du système de candidatures testeurs")
+            except discord.HTTPException:
+                await interaction.response.send_message("❌ Impossible de créer le rôle Testeur.", ephemeral=True)
+                return
+        member = interaction.guild.get_member(self.candidate_id)
+        if member is None:
+            await interaction.response.send_message("❌ Le candidat n'est plus sur le serveur.", ephemeral=True)
+            return
+        try:
+            await member.add_roles(role, reason="Candidature testeur acceptée")
+        except discord.HTTPException:
+            await interaction.response.send_message("❌ Je n'ai pas pu attribuer le rôle. Vérifie ma position dans la hiérarchie.", ephemeral=True)
+            return
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content=f"✅ Candidature acceptée par {interaction.user.mention} — rôle **{role.name}** attribué à {member.mention}.", view=self)
+
+    @discord.ui.button(label="❌ Refuser", style=discord.ButtonStyle.danger, custom_id="testeur_reject")
+    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_staff(interaction):
+            return
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content=f"❌ Candidature refusée par {interaction.user.mention}.", view=self)
+
+
+@bot.command(name="testeur")
+async def testeur_command(ctx: commands.Context):
+    if ctx.guild is None:
+        await ctx.send("❌ Cette commande doit être utilisée sur un serveur.")
+        return
+    await ctx.send("🧪 Ouvre le formulaire de candidature testeur :", view=TesteurStartView())
+
+
+class TesteurStartView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+
+    @discord.ui.button(label="📝 Devenir testeur", style=discord.ButtonStyle.primary)
+    async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TesteurPseudoModal())
+
+
 # ================================================================
 #                          EVENTS
 # ================================================================
@@ -4224,6 +5083,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 async def on_ready():
     bot.add_view(AbsenceView())
     bot.add_view(TicketCloseView())
+    bot.add_view(TesteurValidationView(0))
 
     # Reconstruit les panneaux de tickets existants pour que les boutons
     # restent fonctionnels après un redémarrage du bot.
@@ -4270,6 +5130,9 @@ async def on_ready():
 
     if not check_animal_spawns.is_running():
         check_animal_spawns.start()
+
+    if not check_quetes_loop.is_running():
+        check_quetes_loop.start()
 
     print(f"✅ Connecté en tant que {bot.user}")
  
