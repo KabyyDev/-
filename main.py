@@ -20,7 +20,7 @@ load_dotenv()
 # ================================================================
 PREFIX = "+"
 
-STAFF_ROLE_NAME = "Ping staff"          # Nom exact du rôle staff sur ton serveur
+STAFF_ROLE_NAME = "STAFF"          # Nom exact du rôle staff sur ton serveur
 STATS_CATEGORY_NAME = "🧽 SERVEUR STATS"
 STATS_UPDATE_INTERVAL_MINUTES = 10      # Discord limite les renommages de salons (~2 / 10 min)
 CONFIG_FILE = "config.json"             # Stockage persistant des rôles autorisés à valider
@@ -108,6 +108,8 @@ NORMAL_COMMANDS = [
     ("/guilde boutique", "Affiche la boutique de badges de guilde."),
     ("/guilde acheter [badge]", "Achète un badge pour ta guilde (fondateur, avec l'argent de la guilde)."),
     ("/guilde quetes", "Affiche les 2 quêtes de guilde actives et les dernières complétées."),
+    ("+block guild [id]", "Bloque l'XP d'une guilde adverse 30 min (1200$, 1x/jour, fondateur)."),
+    ("+xp fast", "Booste l'XP de ta propre guilde pendant 5 min (1x/jour, fondateur)."),
 ]
  
 STAFF_COMMANDS = [
@@ -128,6 +130,7 @@ STAFF_COMMANDS = [
     ("/clear [nombre]", "Supprime un nombre de messages dans le salon (staff)."),
     ("+warn @membre <raison>", "Donne un avertissement à un membre."),
     ("+warn list @membre", "Affiche les avertissements d'un membre."),
+    ("+unwarn @membre [n°/all]", "Retire le dernier avertissement, un numéro précis, ou tous."),
     ("+mute @membre <durée> [raison]", "Rend un membre muet (ex : 10m, 2h, 1j)."),
     ("+unmute @membre", "Retire le mute d'un membre."),
     ("+add role @membre @role", "Ajoute un rôle à un membre."),
@@ -140,6 +143,9 @@ STAFF_COMMANDS = [
     ("/guilde delete [id]", "Supprime une guilde par son ID."),
     ("/guilde classement reset:True", "[Admin] Réinitialise le classement des guildes (sans toucher aux niveaux)."),
     ("/guilde quetesconfig [salon]", "Définit le salon d'annonce des quêtes de guilde."),
+    ("/bienvenue config [salon] [message]", "Configure le message de bienvenue des nouveaux membres (staff)."),
+    ("/bienvenue test", "Envoie un message de bienvenue de test (staff)."),
+    ("/bienvenue desactiver", "Désactive le message de bienvenue (staff)."),
 ]
 
 
@@ -273,6 +279,34 @@ GUILD_EXCLUSIVE_CHANNEL_LEVEL = 20  # Niveau qui débloque un salon privé rése
 
 # ---- Boutique de guilde (argent gagné en montant de niveau) ----
 GUILD_MONEY_PER_LEVEL = 20  # 1 niveau passé = 20$ ajoutés à la trésorerie de la guilde
+
+# ---- Nerf d'XP selon le nombre de membres ----
+# Plus une guilde a de membres, moins chaque membre rapporte d'XP individuellement,
+# pour éviter qu'une grosse guilde écrase mécaniquement les petites.
+# L'XP par message est divisée par la racine carrée du nombre de membres :
+#   1 membre  -> 10 XP/message  (total équivalent : 1 membre "plein")
+#   2 membres -> 7 XP/message   (total équivalent : ~1,4 membre)
+#   4 membres -> 5 XP/message   (total équivalent : 2 membres)
+#   9 membres -> 3 XP/message   (total équivalent : 3 membres)
+GUILD_XP_MIN_PER_MESSAGE = 1  # plancher : un membre rapporte toujours au moins 1 XP
+
+
+def guild_xp_gain_for_size(nb_membres: int) -> int:
+    """XP gagnée par message selon la taille de la guilde (rendements décroissants)."""
+    nb_membres = max(1, int(nb_membres))
+    gain = GUILD_XP_PER_MESSAGE / (nb_membres ** 0.5)
+    return max(GUILD_XP_MIN_PER_MESSAGE, int(round(gain)))
+
+
+# ---- Objets utilisables (+block guild / +xp fast) ----
+BLOCK_GUILD_PRICE = 1200            # coût en $ pris dans la trésorerie de ta guilde
+BLOCK_GUILD_DURATION_MINUTES = 30   # durée du blocage d'XP infligé à la guilde ciblée
+BLOCK_GUILD_COOLDOWN_HOURS = 24     # utilisable 1 fois par jour et par guilde
+
+XP_FAST_PRICE = 800                 # coût en $ (mets 0 si tu veux le rendre gratuit)
+XP_FAST_DURATION_MINUTES = 5        # durée du boost d'XP sur ta propre guilde
+XP_FAST_MULTIPLIER = 3              # XP multipliée par 3 pendant le boost
+XP_FAST_COOLDOWN_HOURS = 24         # utilisable 1 fois par jour et par guilde
 
 GUILD_BADGES = {
     "nul": {"name": "🗑️ La plus nul des guildes", "price": 1},
@@ -448,6 +482,52 @@ def guild_max_members(level: int) -> int:
     return GUILD_MAX_MEMBERS if level >= GUILD_CAPACITY_LEVEL else GUILD_START_MAX_MEMBERS
 
 
+def _parse_dt(value):
+    """Relit une date stockée en ISO dans config.json. Retourne None si absente/invalide."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=PARIS_TZ)
+    return dt
+
+
+def is_guild_blocked(guild_data: dict) -> bool:
+    """True si la guilde est actuellement sous l'effet d'un +block guild (aucun gain d'XP)."""
+    fin = _parse_dt(guild_data.get("block_until"))
+    return fin is not None and datetime.now(PARIS_TZ) < fin
+
+
+def is_guild_xp_fast(guild_data: dict) -> bool:
+    """True si la guilde bénéficie actuellement d'un boost +xp fast."""
+    fin = _parse_dt(guild_data.get("xpfast_until"))
+    return fin is not None and datetime.now(PARIS_TZ) < fin
+
+
+def cooldown_restant(last_used_iso, heures: int):
+    """Retourne le timedelta restant avant réutilisation, ou None si disponible."""
+    dernier = _parse_dt(last_used_iso)
+    if dernier is None:
+        return None
+    prochain = dernier + timedelta(hours=heures)
+    maintenant = datetime.now(PARIS_TZ)
+    return prochain - maintenant if maintenant < prochain else None
+
+
+def format_duree(delta: timedelta) -> str:
+    total = int(delta.total_seconds())
+    heures, reste = divmod(total, 3600)
+    minutes, secondes = divmod(reste, 60)
+    if heures:
+        return f"{heures}h {minutes}min"
+    if minutes:
+        return f"{minutes}min {secondes}s"
+    return f"{secondes}s"
+
+
 async def get_or_create_chef_guilde_role(guild: discord.Guild) -> discord.Role | None:
     role = discord.utils.get(guild.roles, name=CHEF_GUILDE_ROLE_NAME)
     if role is None:
@@ -564,6 +644,10 @@ def ensure_guild_defaults(guild_data: dict) -> bool:
         "argent": 0,
         "argent_total": 0,
         "badges": [],
+        "block_until": None,
+        "block_last_used": None,
+        "xpfast_until": None,
+        "xpfast_last_used": None,
         "max_members": GUILD_START_MAX_MEMBERS,
         "rename_available": False,
         "verified": False,
@@ -624,6 +708,21 @@ def build_guild_embed(guild_id: str, guild_data: dict, discord_guild: discord.Gu
     embed.add_field(name="📋 Statut", value=status, inline=True)
     embed.add_field(name="🏆 Points de classement", value=f"**{int(guild_data.get('classement_points', 0))}** pts", inline=True)
     embed.add_field(name="💰 Argent", value=f"**{int(guild_data.get('argent', 0))}$**", inline=True)
+    embed.add_field(
+        name="⚡ XP par message",
+        value=f"**{guild_xp_gain_for_size(len(members))}** XP (réduit selon la taille)",
+        inline=True,
+    )
+
+    etats = []
+    if is_guild_blocked(guild_data):
+        fin = _parse_dt(guild_data.get("block_until"))
+        etats.append(f"🚫 Bloquée encore {format_duree(fin - datetime.now(PARIS_TZ))}")
+    if is_guild_xp_fast(guild_data):
+        fin = _parse_dt(guild_data.get("xpfast_until"))
+        etats.append(f"⚡ Boost x{XP_FAST_MULTIPLIER} encore {format_duree(fin - datetime.now(PARIS_TZ))}")
+    if etats:
+        embed.add_field(name="🔔 Effets actifs", value="\n".join(etats), inline=False)
 
     badges = guild_data.get("badges", [])
     if badges:
@@ -764,6 +863,7 @@ async def check_and_complete_quetes(guild: discord.Guild) -> None:
     if changed:
         save_server_guilds(guild.id, server_guilds)
         save_config(config)
+
 
 class GuildCreateModal(discord.ui.Modal, title="Créer une guilde"):
     nom = discord.ui.TextInput(
@@ -1551,6 +1651,145 @@ async def guilde_delete_cmd(interaction: discord.Interaction, id: str):
 
 
 bot.tree.add_command(guilde_group)
+
+
+# ================================================================
+#           OBJETS DE GUILDE (+block guild / +xp fast)
+# ================================================================
+#
+# +block guild <ID>  : bloque l'XP d'une guilde adverse pendant 30 min.
+#                      Coûte 1200$ dans la trésorerie de TA guilde,
+#                      utilisable 1 seule fois par jour et par guilde.
+# +xp fast           : booste l'XP de TA propre guilde pendant 5 min.
+#                      Utilisable 1 seule fois par jour et par guilde.
+#
+# Dans les deux cas, seul le fondateur (chef de guilde) peut déclencher l'objet.
+
+@bot.command(name="block")
+async def block_command(ctx: commands.Context, cible_type: str = None, guild_id: str = None):
+    if ctx.guild is None:
+        return
+
+    if cible_type is None or cible_type.lower() != "guild" or guild_id is None:
+        await ctx.send("❌ Utilisation : `+block guild <ID de la guilde>`")
+        return
+
+    mon_id, ma_guilde = find_member_guild(ctx.guild.id, ctx.author.id)
+    if not ma_guilde:
+        await ctx.send("❌ Tu ne fais partie d'aucune guilde.")
+        return
+    if int(ma_guilde["owner_id"]) != ctx.author.id:
+        await ctx.send("❌ Seul le fondateur de la guilde peut utiliser cet objet.")
+        return
+    if not ma_guilde.get("verified"):
+        await ctx.send("❌ Ta guilde doit être vérifiée par le staff pour utiliser cet objet.")
+        return
+
+    guilds = get_server_guilds(ctx.guild.id)
+    cible_id = guild_id.upper()
+    cible = guilds.get(cible_id)
+    if not cible:
+        await ctx.send("❌ Guilde introuvable. Vérifie l'ID (visible avec `/guilde info`).")
+        return
+    if cible_id == mon_id:
+        await ctx.send("❌ Tu ne peux pas bloquer ta propre guilde.")
+        return
+    ensure_guild_defaults(cible)
+
+    # Cooldown : 1 utilisation par jour et par guilde attaquante.
+    restant = cooldown_restant(ma_guilde.get("block_last_used"), BLOCK_GUILD_COOLDOWN_HOURS)
+    if restant:
+        await ctx.send(f"⏳ Ta guilde a déjà utilisé cet objet aujourd'hui. Réessaie dans **{format_duree(restant)}**.")
+        return
+
+    argent = int(ma_guilde.get("argent", 0))
+    if argent < BLOCK_GUILD_PRICE:
+        await ctx.send(
+            f"❌ Trésorerie insuffisante : il faut **{BLOCK_GUILD_PRICE}$** mais ta guilde n'a que **{argent}$**."
+        )
+        return
+
+    if is_guild_blocked(cible):
+        await ctx.send(f"⚠️ **{cible['name']}** est déjà sous l'effet d'un blocage.")
+        return
+
+    maintenant = datetime.now(PARIS_TZ)
+    ma_guilde["argent"] = argent - BLOCK_GUILD_PRICE
+    ma_guilde["block_last_used"] = maintenant.isoformat()
+    cible["block_until"] = (maintenant + timedelta(minutes=BLOCK_GUILD_DURATION_MINUTES)).isoformat()
+    save_server_guilds(ctx.guild.id, guilds)
+
+    embed = discord.Embed(
+        title="🚫 Guilde bloquée !",
+        description=(
+            f"**{ma_guilde['name']}** a bloqué **{cible['name']}** (`{cible_id}`) !\n\n"
+            f"⏱️ Plus aucun gain d'XP pour cette guilde pendant **{BLOCK_GUILD_DURATION_MINUTES} minutes**."
+        ),
+        color=discord.Color.dark_red(),
+    )
+    embed.set_footer(text=f"Coût : {BLOCK_GUILD_PRICE}$ • Trésorerie restante : {ma_guilde['argent']}$")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="xp")
+async def xp_command(ctx: commands.Context, sous_commande: str = None):
+    if ctx.guild is None:
+        return
+
+    if sous_commande is None or sous_commande.lower() != "fast":
+        await ctx.send("❌ Utilisation : `+xp fast` (booste l'XP de ta propre guilde).")
+        return
+
+    mon_id, ma_guilde = find_member_guild(ctx.guild.id, ctx.author.id)
+    if not ma_guilde:
+        await ctx.send("❌ Tu ne fais partie d'aucune guilde.")
+        return
+    if int(ma_guilde["owner_id"]) != ctx.author.id:
+        await ctx.send("❌ Seul le fondateur de la guilde peut utiliser cet objet.")
+        return
+    if not ma_guilde.get("verified"):
+        await ctx.send("❌ Ta guilde doit être vérifiée par le staff pour utiliser cet objet.")
+        return
+
+    ensure_guild_defaults(ma_guilde)
+
+    if is_guild_blocked(ma_guilde):
+        await ctx.send("❌ Ta guilde est actuellement bloquée : impossible de booster l'XP pour le moment.")
+        return
+    if is_guild_xp_fast(ma_guilde):
+        await ctx.send("⚠️ Un boost d'XP est déjà actif sur ta guilde.")
+        return
+
+    restant = cooldown_restant(ma_guilde.get("xpfast_last_used"), XP_FAST_COOLDOWN_HOURS)
+    if restant:
+        await ctx.send(f"⏳ Ta guilde a déjà utilisé cet objet aujourd'hui. Réessaie dans **{format_duree(restant)}**.")
+        return
+
+    argent = int(ma_guilde.get("argent", 0))
+    if XP_FAST_PRICE and argent < XP_FAST_PRICE:
+        await ctx.send(
+            f"❌ Trésorerie insuffisante : il faut **{XP_FAST_PRICE}$** mais ta guilde n'a que **{argent}$**."
+        )
+        return
+
+    maintenant = datetime.now(PARIS_TZ)
+    if XP_FAST_PRICE:
+        ma_guilde["argent"] = argent - XP_FAST_PRICE
+    ma_guilde["xpfast_last_used"] = maintenant.isoformat()
+    ma_guilde["xpfast_until"] = (maintenant + timedelta(minutes=XP_FAST_DURATION_MINUTES)).isoformat()
+    save_server_guilds(ctx.guild.id, get_server_guilds(ctx.guild.id))
+
+    embed = discord.Embed(
+        title="⚡ Boost d'XP activé !",
+        description=(
+            f"**{ma_guilde['name']}** gagne **x{XP_FAST_MULTIPLIER} d'XP** pendant "
+            f"**{XP_FAST_DURATION_MINUTES} minutes** !\n\nÀ vos claviers, c'est le moment de parler 💬"
+        ),
+        color=discord.Color.green(),
+    )
+    if XP_FAST_PRICE:
+        embed.set_footer(text=f"Coût : {XP_FAST_PRICE}$ • Trésorerie restante : {ma_guilde['argent']}$")
+    await ctx.send(embed=embed)
 
 
 # ================================================================
@@ -3882,6 +4121,36 @@ UPDATE_LOGS = [
             "`/guilde quetes` affiche les quêtes en cours et l'historique des dernières complétées."
         ),
     },
+    {
+        "titre": "⚖️ Équilibrage & nouveaux objets de guilde",
+        "description": (
+            "L'XP par message est désormais **réduite selon la taille de la guilde** : à 4 membres, "
+            "la guilde progresse comme si elle n'en avait que 2. Les petites guildes restent compétitives.\n"
+            "**`+block guild <ID>`** — bloque l'XP d'une guilde adverse pendant 30 min (1200$, 1x/jour).\n"
+            "**`+xp fast`** — multiplie par 3 l'XP de ta propre guilde pendant 5 min (1x/jour).\n"
+            "Ces deux objets sont réservés au fondateur de la guilde."
+        ),
+    },
+    {
+        "titre": "👋 Message de bienvenue",
+        "description": (
+            "`/bienvenue config` (staff) permet de choisir le salon et de personnaliser entièrement "
+            "le message envoyé à chaque nouvelle arrivée.\n"
+            "Variables disponibles : `{membre}`, `{pseudo}`, `{serveur}`, `{nombre}` — au choix en "
+            "encadré coloré ou en message texte simple.\n"
+            "`/bienvenue test` permet d'en voir le rendu avant l'arrivée d'un vrai membre."
+        ),
+    },
+    {
+        "titre": "✅ Retrait d'avertissements",
+        "description": (
+            "Nouvelle commande **`+unwarn @membre`** (staff) pour retirer le dernier avertissement "
+            "d'un membre.\n"
+            "`+unwarn @membre 2` retire un avertissement précis (numéros visibles avec `+warn list`), "
+            "et `+unwarn @membre all` les efface tous.\n"
+            "Le membre est prévenu en message privé du retrait."
+        ),
+    },
 ]
 
 
@@ -3936,6 +4205,158 @@ async def set_updatelogs(interaction: discord.Interaction, salon: discord.TextCh
 
 bot.tree.add_command(set_group)
 
+
+# ================================================================
+#        MESSAGE DE BIENVENUE PERSONNALISÉ (/bienvenue)
+# ================================================================
+#
+# Le staff choisit le salon et le texte du message envoyé à chaque nouvelle
+# arrivée sur le serveur. Variables utilisables dans le message :
+#   {membre}  -> mentionne le nouveau (@Pseudo)
+#   {pseudo}  -> son pseudo sans mention
+#   {serveur} -> nom du serveur
+#   {nombre}  -> nombre total de membres après son arrivée
+#
+# Deux styles d'affichage : "embed" (encadré coloré, par défaut) ou "texte"
+# (message simple, qui permet de vraiment ping le nouveau membre).
+
+BIENVENUE_DEFAULT_MESSAGE = "👋 Bienvenue {membre} sur **{serveur}** ! Tu es notre {nombre}ᵉ membre 🎉"
+
+
+def format_bienvenue(template: str, member: discord.Member) -> str:
+    return (
+        template.replace("{membre}", member.mention)
+        .replace("{pseudo}", member.display_name)
+        .replace("{serveur}", member.guild.name)
+        .replace("{nombre}", str(member.guild.member_count))
+    )
+
+
+async def envoyer_message_bienvenue(member: discord.Member) -> None:
+    """Envoie le message de bienvenue configuré, s'il y en a un sur ce serveur."""
+    conf = config.get(str(member.guild.id), {}).get("bienvenue_config")
+    if not conf or not conf.get("channel_id") or not conf.get("actif", True):
+        return
+
+    channel = member.guild.get_channel(conf["channel_id"])
+    if channel is None:
+        return
+
+    texte = format_bienvenue(conf.get("message") or BIENVENUE_DEFAULT_MESSAGE, member)
+
+    try:
+        if conf.get("style", "embed") == "texte":
+            await channel.send(texte)
+        else:
+            embed = discord.Embed(
+                title=conf.get("titre") or f"👋 Bienvenue sur {member.guild.name} !",
+                description=texte,
+                color=discord.Color.blurple(),
+                timestamp=datetime.now(PARIS_TZ),
+            )
+            embed.set_thumbnail(url=member.display_avatar.url)
+            embed.set_footer(text=f"{member.guild.member_count} membres au total")
+            # Mention hors embed : un embed seul ne notifie jamais le membre.
+            await channel.send(content=member.mention, embed=embed)
+    except discord.HTTPException:
+        pass
+
+
+bienvenue_group = app_commands.Group(name="bienvenue", description="Message de bienvenue des nouveaux membres (staff)")
+
+
+@bienvenue_group.command(name="config", description="[Staff] Configure le salon et le message de bienvenue")
+@app_commands.describe(
+    salon="Salon où sera envoyé le message de bienvenue",
+    message="Texte du message. Variables : {membre} {pseudo} {serveur} {nombre}",
+    style="Affichage : encadré coloré (embed) ou message texte simple",
+    titre="Titre de l'encadré (uniquement en style embed)",
+)
+@app_commands.choices(style=[
+    app_commands.Choice(name="Encadré coloré (embed)", value="embed"),
+    app_commands.Choice(name="Message texte simple", value="texte"),
+])
+async def bienvenue_config_cmd(
+    interaction: discord.Interaction,
+    salon: discord.TextChannel,
+    message: str = None,
+    style: app_commands.Choice[str] = None,
+    titre: str = None,
+):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message(
+            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+
+    guild_conf = config.setdefault(str(interaction.guild.id), {})
+    conf = guild_conf.setdefault("bienvenue_config", {})
+    conf["channel_id"] = salon.id
+    conf["actif"] = True
+    if message:
+        conf["message"] = message
+    if style:
+        conf["style"] = style.value
+    if titre:
+        conf["titre"] = titre
+    save_config(config)
+
+    apercu = format_bienvenue(conf.get("message") or BIENVENUE_DEFAULT_MESSAGE, interaction.user)
+    await interaction.response.send_message(
+        f"✅ Message de bienvenue activé dans {salon.mention}.\n\n"
+        f"**Aperçu :**\n{apercu}\n\n"
+        "Variables disponibles : `{membre}` `{pseudo}` `{serveur}` `{nombre}`\n"
+        "Teste le rendu réel avec `/bienvenue test`.",
+        ephemeral=True,
+    )
+
+
+@bienvenue_group.command(name="test", description="[Staff] Envoie un message de bienvenue de test avec toi-même")
+async def bienvenue_test_cmd(interaction: discord.Interaction):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message(
+            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+
+    conf = config.get(str(interaction.guild.id), {}).get("bienvenue_config")
+    if not conf or not conf.get("channel_id"):
+        await interaction.response.send_message(
+            "❌ Le message de bienvenue n'est pas configuré. Utilise `/bienvenue config` d'abord.", ephemeral=True
+        )
+        return
+
+    await envoyer_message_bienvenue(interaction.user)
+    salon = interaction.guild.get_channel(conf["channel_id"])
+    await interaction.response.send_message(
+        f"✅ Message de test envoyé dans {salon.mention if salon else 'le salon configuré'}.", ephemeral=True
+    )
+
+
+@bienvenue_group.command(name="desactiver", description="[Staff] Désactive le message de bienvenue")
+async def bienvenue_desactiver_cmd(interaction: discord.Interaction):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message(
+            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+
+    guild_conf = config.setdefault(str(interaction.guild.id), {})
+    conf = guild_conf.get("bienvenue_config")
+    if not conf:
+        await interaction.response.send_message("❌ Aucun message de bienvenue n'est configuré.", ephemeral=True)
+        return
+
+    conf["actif"] = False
+    save_config(config)
+    await interaction.response.send_message(
+        "✅ Message de bienvenue désactivé. Relance `/bienvenue config` pour le réactiver.", ephemeral=True
+    )
+
+
+bot.tree.add_command(bienvenue_group)
+
+
 # ================================================================
 #                       +invite-stats
 # ================================================================
@@ -3954,8 +4375,15 @@ async def update_invites_cache(guild: discord.Guild) -> None:
 @bot.event
 async def on_member_join(member: discord.Member):
     guild = member.guild
+
+    # ---- Message de bienvenue personnalisé ----
+    # Envoyé en premier, indépendamment du suivi des invitations : ainsi il
+    # part même si le bot n'a pas la permission de lire les invitations.
+    await envoyer_message_bienvenue(member)
+
+    # ---- Suivi des invitations ----
     old_invites = invites_cache.get(guild.id, {})
- 
+
     try:
         new_invites = await guild.invites()
     except discord.Forbidden:
@@ -4278,6 +4706,36 @@ def add_warn(guild_id: int, user_id: int, moderator_id: int, raison: str) -> int
     return len(user_warns)
  
  
+def remove_warn(guild_id: int, user_id: int, index: int = -1):
+    """Retire un avertissement. index = -1 pour le dernier, sinon l'index (0-based).
+    Retourne (warn_supprimé, nb_restants) ou (None, nb_restants) si introuvable."""
+    guild_conf = config.setdefault(str(guild_id), {})
+    warns = guild_conf.setdefault("warns", {})
+    user_warns = warns.get(str(user_id), [])
+
+    if not user_warns:
+        return None, 0
+    if index != -1 and not (0 <= index < len(user_warns)):
+        return None, len(user_warns)
+
+    supprime = user_warns.pop(index)
+    if not user_warns:
+        del warns[str(user_id)]
+    save_config(config)
+    return supprime, len(user_warns)
+
+
+def clear_warns(guild_id: int, user_id: int) -> int:
+    """Supprime tous les avertissements d'un membre. Retourne le nombre supprimé."""
+    guild_conf = config.setdefault(str(guild_id), {})
+    warns = guild_conf.setdefault("warns", {})
+    nb = len(warns.get(str(user_id), []))
+    if str(user_id) in warns:
+        del warns[str(user_id)]
+        save_config(config)
+    return nb
+
+
 @bot.command(name="warn")
 async def warn_command(ctx: commands.Context, cible: str = None, *, reste: str = None):
     if not is_staff(ctx.author):
@@ -4347,6 +4805,91 @@ async def warn_command(ctx: commands.Context, cible: str = None, *, reste: str =
     try:
         await membre.send(
             f"⚠️ Tu as reçu un avertissement sur **{ctx.guild.name}**.\nRaison : {raison}"
+        )
+    except discord.HTTPException:
+        pass
+ 
+ 
+@bot.command(name="unwarn")
+async def unwarn_command(ctx: commands.Context, cible: str = None, numero: str = None):
+    """+unwarn @membre          -> retire le dernier avertissement
+       +unwarn @membre 2        -> retire l'avertissement n°2
+       +unwarn @membre all      -> retire tous les avertissements"""
+    if not is_staff(ctx.author):
+        await ctx.send("❌ Cette commande est réservée au staff.")
+        return
+
+    if cible is None:
+        await ctx.send(
+            "❌ Utilisation :\n"
+            "`+unwarn @membre` — Retire le dernier avertissement\n"
+            "`+unwarn @membre 2` — Retire l'avertissement n°2 (numéros visibles avec `+warn list @membre`)\n"
+            "`+unwarn @membre all` — Retire tous les avertissements"
+        )
+        return
+
+    try:
+        membre = await commands.MemberConverter().convert(ctx, cible)
+    except commands.MemberNotFound:
+        await ctx.send("❌ Membre introuvable.")
+        return
+
+    warns = get_warns(ctx.guild.id, membre.id)
+    if not warns:
+        await ctx.send(f"❌ {membre.mention} n'a aucun avertissement.")
+        return
+
+    # ---- +unwarn @membre all ----
+    if numero and numero.lower() in {"all", "tout", "tous"}:
+        nb = clear_warns(ctx.guild.id, membre.id)
+        embed = discord.Embed(
+            title="🧹 Avertissements effacés",
+            description=f"Les **{nb}** avertissement(s) de {membre.mention} ont été supprimés.",
+            color=discord.Color.green(),
+        )
+        embed.set_footer(text=f"Par {ctx.author}")
+        await ctx.send(embed=embed)
+
+        try:
+            await membre.send(
+                f"✅ Tous tes avertissements sur **{ctx.guild.name}** ont été retirés par le staff."
+            )
+        except discord.HTTPException:
+            pass
+        return
+
+    # ---- +unwarn @membre [numéro] ----
+    index = -1
+    if numero is not None:
+        try:
+            saisi = int(numero)
+        except ValueError:
+            await ctx.send("❌ Numéro invalide. Utilise un nombre, ou `all` pour tout retirer.")
+            return
+        if not (1 <= saisi <= len(warns)):
+            await ctx.send(
+                f"❌ Numéro invalide : {membre.display_name} a **{len(warns)}** avertissement(s). "
+                "Vérifie les numéros avec `+warn list @membre`."
+            )
+            return
+        index = saisi - 1
+
+    supprime, restants = remove_warn(ctx.guild.id, membre.id, index)
+    if supprime is None:
+        await ctx.send("❌ Impossible de retirer cet avertissement.")
+        return
+
+    embed = discord.Embed(title="✅ Avertissement retiré", color=discord.Color.green())
+    embed.add_field(name="Membre", value=membre.mention, inline=True)
+    embed.add_field(name="Retiré par", value=ctx.author.mention, inline=True)
+    embed.add_field(name="Raison de l'avertissement", value=supprime.get("reason", "—"), inline=False)
+    embed.set_footer(text=f"{membre.display_name} a désormais {restants} avertissement(s).")
+    await ctx.send(embed=embed)
+
+    try:
+        await membre.send(
+            f"✅ Un de tes avertissements sur **{ctx.guild.name}** a été retiré.\n"
+            f"Il t'en reste **{restants}**."
         )
     except discord.HTTPException:
         pass
@@ -4697,6 +5240,10 @@ async def add_guild_message_xp(message: discord.Message) -> None:
     if not guild_data.get("verified"):
         return
 
+    # Guilde sous l'effet d'un +block guild : aucun gain d'XP ni de points.
+    if is_guild_blocked(guild_data):
+        return
+
     now = datetime.now(PARIS_TZ)
     server_cooldowns = GUILD_XP_COOLDOWNS.setdefault(message.guild.id, {})
     last_gain = server_cooldowns.get(message.author.id)
@@ -4706,7 +5253,13 @@ async def add_guild_message_xp(message: discord.Message) -> None:
     server_cooldowns[message.author.id] = now
     old_level = int(guild_data.get("level", 1))
     old_max = guild_max_members(old_level)
-    guild_data["xp"] = int(guild_data.get("xp", 0)) + GUILD_XP_PER_MESSAGE
+
+    # Rendements décroissants : plus la guilde a de membres, moins chaque
+    # message rapporte d'XP individuellement.
+    gain_xp = guild_xp_gain_for_size(len(guild_data.get("members", [])))
+    if is_guild_xp_fast(guild_data):
+        gain_xp *= XP_FAST_MULTIPLIER
+    guild_data["xp"] = int(guild_data.get("xp", 0)) + gain_xp
 
     # Points de classement : volontairement plus durs à obtenir que l'XP/niveau.
     # Un seul gain sur GUILD_CLASSEMENT_HARD_INTERVAL messages valides rapporte des points.
@@ -4898,183 +5451,6 @@ async def rotation_statut():
 async def before_rotation_statut():
     await bot.wait_until_ready()
 
-
-# ================================================================
-#                    SYSTÈME TESTEURS
-# ================================================================
-TESTEUR_ROLE_NAME = "Testeur"
-TESTEUR_LOG_CHANNEL_NAME = "📋┃candidatures-testeurs"
-
-
-def get_testeur_channel(guild: discord.Guild) -> discord.TextChannel | None:
-    return discord.utils.get(guild.text_channels, name=TESTEUR_LOG_CHANNEL_NAME)
-
-
-class TesteurAmbitionModal(discord.ui.Modal, title="Candidature testeur — 2/2"):
-    def __init__(self, pseudo: str, role_principal: str):
-        super().__init__()
-
-        self.pseudo = pseudo
-        self.role_principal = role_principal
-
-        self.ambition = discord.ui.TextInput(
-            label="Ton ambition pour être testeur",
-            placeholder="Explique pourquoi tu veux devenir testeur...",
-            style=discord.TextStyle.paragraph,
-            min_length=10,
-            max_length=1000,
-            required=True,
-        )
-        self.add_item(self.ambition)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        channel = get_testeur_channel(interaction.guild) if interaction.guild else None
-        if channel is None:
-            await interaction.response.send_message(
-                f"❌ Le salon **{TESTEUR_LOG_CHANNEL_NAME}** est introuvable. Préviens le staff.",
-                ephemeral=True,
-            )
-            return
-
-        embed = discord.Embed(
-            title="🧪 Nouvelle candidature testeur",
-            color=discord.Color.orange(),
-            timestamp=datetime.now(PARIS_TZ),
-        )
-        embed.add_field(name="Candidat", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
-        embed.add_field(name="Pseudo Discord", value=self.pseudo, inline=True)
-        embed.add_field(name="Rôle sur le serveur principal", value=self.role_principal, inline=True)
-        embed.add_field(name="Ambition", value=self.ambition.value, inline=False)
-        embed.set_footer(text="Statut : en attente de validation")
-
-        await channel.send(embed=embed, view=TesteurValidationView(interaction.user.id))
-        await interaction.response.send_message(
-            "✅ Ta candidature a été envoyée au staff. Tu recevras une réponse après validation.",
-            ephemeral=True,
-        )
-
-
-class TesteurPseudoModal(discord.ui.Modal, title="Candidature testeur — 1/2"):
-    def __init__(self):
-        super().__init__()
-
-        self.pseudo = discord.ui.TextInput(
-            label="Pseudo Discord",
-            placeholder="Ex : MonPseudo",
-            min_length=2,
-            max_length=100,
-            required=True,
-        )
-        self.role_principal = discord.ui.TextInput(
-            label="Rôle sur le serveur principal",
-            placeholder="Ex : Membre, Modérateur, Développeur...",
-            min_length=2,
-            max_length=100,
-            required=True,
-        )
-
-        self.add_item(self.pseudo)
-        self.add_item(self.role_principal)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        # Discord ne permet pas d'ouvrir directement une seconde modal
-        # depuis la soumission d'une première modal.
-        await interaction.response.send_message(
-            "Tes informations ont été enregistrées. Clique sur **Continuer** "
-            "pour remplir la deuxième partie.",
-            view=TesteurContinueView(
-                self.pseudo.value.strip(),
-                self.role_principal.value.strip(),
-            ),
-            ephemeral=True,
-        )
-
-
-class TesteurContinueView(discord.ui.View):
-    def __init__(self, pseudo: str, role_principal: str):
-        super().__init__(timeout=300)
-        self.pseudo = pseudo
-        self.role_principal = role_principal
-
-    @discord.ui.button(
-        label="Continuer",
-        emoji="➡️",
-        style=discord.ButtonStyle.primary,
-    )
-    async def continue_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-        await interaction.response.send_modal(
-            TesteurAmbitionModal(
-                self.pseudo,
-                self.role_principal,
-            )
-        )
-
-
-class TesteurValidationView(discord.ui.View):
-    def __init__(self, candidate_id: int):
-        super().__init__(timeout=None)
-        self.candidate_id = candidate_id
-
-    async def _check_staff(self, interaction: discord.Interaction) -> bool:
-        if not isinstance(interaction.user, discord.Member) or not is_staff(interaction.user):
-            await interaction.response.send_message("❌ Cette action est réservée au staff.", ephemeral=True)
-            return False
-        return True
-
-    @discord.ui.button(label="✅ Accepter", style=discord.ButtonStyle.success, custom_id="testeur_accept")
-    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._check_staff(interaction):
-            return
-        role = discord.utils.get(interaction.guild.roles, name=TESTEUR_ROLE_NAME)
-        if role is None:
-            try:
-                role = await interaction.guild.create_role(name=TESTEUR_ROLE_NAME, reason="Rôle du système de candidatures testeurs")
-            except discord.HTTPException:
-                await interaction.response.send_message("❌ Impossible de créer le rôle Testeur.", ephemeral=True)
-                return
-        member = interaction.guild.get_member(self.candidate_id)
-        if member is None:
-            await interaction.response.send_message("❌ Le candidat n'est plus sur le serveur.", ephemeral=True)
-            return
-        try:
-            await member.add_roles(role, reason="Candidature testeur acceptée")
-        except discord.HTTPException:
-            await interaction.response.send_message("❌ Je n'ai pas pu attribuer le rôle. Vérifie ma position dans la hiérarchie.", ephemeral=True)
-            return
-        for child in self.children:
-            child.disabled = True
-        await interaction.response.edit_message(content=f"✅ Candidature acceptée par {interaction.user.mention} — rôle **{role.name}** attribué à {member.mention}.", view=self)
-
-    @discord.ui.button(label="❌ Refuser", style=discord.ButtonStyle.danger, custom_id="testeur_reject")
-    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._check_staff(interaction):
-            return
-        for child in self.children:
-            child.disabled = True
-        await interaction.response.edit_message(content=f"❌ Candidature refusée par {interaction.user.mention}.", view=self)
-
-
-@bot.command(name="testeur")
-async def testeur_command(ctx: commands.Context):
-    if ctx.guild is None:
-        await ctx.send("❌ Cette commande doit être utilisée sur un serveur.")
-        return
-    await ctx.send("🧪 Ouvre le formulaire de candidature testeur :", view=TesteurStartView())
-
-
-class TesteurStartView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=180)
-
-    @discord.ui.button(label="📝 Devenir testeur", style=discord.ButtonStyle.primary)
-    async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(TesteurPseudoModal())
-
-
 # ================================================================
 #                          EVENTS
 # ================================================================
@@ -5083,7 +5459,6 @@ class TesteurStartView(discord.ui.View):
 async def on_ready():
     bot.add_view(AbsenceView())
     bot.add_view(TicketCloseView())
-    bot.add_view(TesteurValidationView(0))
 
     # Reconstruit les panneaux de tickets existants pour que les boutons
     # restent fonctionnels après un redémarrage du bot.
@@ -5137,7 +5512,7 @@ async def on_ready():
     print(f"✅ Connecté en tant que {bot.user}")
  
 if __name__ == "__main__":
-    TOKEN = os.getenv("DISCORD_TOKEN")
+    TOKEN = ("DISCORD_TOKEN")
     if not TOKEN:
         raise RuntimeError("Défini la variable d'environnement DISCORD_TOKEN avant de lancer le bot.")
     bot.run(TOKEN)
