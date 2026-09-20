@@ -20,11 +20,17 @@ load_dotenv()
 # ================================================================
 PREFIX = "+"
 
-STAFF_ROLE_NAME = "STAFF"          # Nom exact du rôle staff sur ton serveur
+STAFF_ROLE_NAME = "STAFF"          # Nom exact du rôle staff sur ton serveur (utilisé pour tickets, guildes, etc.)
 STATS_CATEGORY_NAME = "🧽 SERVEUR STATS"
 STATS_UPDATE_INTERVAL_MINUTES = 10      # Discord limite les renommages de salons (~2 / 10 min)
 CONFIG_FILE = "config.json"             # Stockage persistant des rôles autorisés à valider
 DEV_GUILD_ID = 1539254757951021147      # ID de ton serveur, pour une synchro instantanée des slash commands
+
+# ---- Hiérarchie de modération (Helper < Mod < Gérant) ----
+# Chaque rôle supérieur hérite automatiquement des permissions du rôle inférieur.
+HELPER_ROLE_NAME = "・・ModérateurJunior"
+MOD_ROLE_NAME = "Modérateur"
+GERANT_ROLE_NAME = "・Gérant Moderation"
  
 # ---- Élu de la semaine ----
 ELU_ROLE_NAME = "👑 Élu de la semaine"
@@ -52,6 +58,31 @@ def is_staff(member: discord.Member) -> bool:
     if member.guild_permissions.administrator:
         return True
     return any(role.name == STAFF_ROLE_NAME for role in member.roles)
+
+
+def is_gerant(member: discord.Member) -> bool:
+    """Niveau le plus haut : ban, mute, lock/unlock, retrait de warns, +add role.
+    Inclut aussi le rôle STAFF_ROLE_NAME existant, pour ne rien casser des
+    fonctionnalités déjà réservées au staff (tickets, guildes, etc.)."""
+    if member.guild_permissions.administrator:
+        return True
+    if any(role.name == GERANT_ROLE_NAME for role in member.roles):
+        return True
+    return is_staff(member)
+
+
+def is_mod(member: discord.Member) -> bool:
+    """Niveau intermédiaire : mute, warn, clear. Ne peut PAS retirer de warns."""
+    if is_gerant(member):
+        return True
+    return any(role.name == MOD_ROLE_NAME for role in member.roles)
+
+
+def is_helper(member: discord.Member) -> bool:
+    """Niveau le plus bas : peut seulement warn. Ne peut PAS retirer de warns."""
+    if is_mod(member):
+        return True
+    return any(role.name == HELPER_ROLE_NAME for role in member.roles)
  
  
 # ---------------- Config persistante (rôles de validation) ----------------
@@ -1799,8 +1830,8 @@ async def xp_command(ctx: commands.Context, sous_commande: str = None):
 
 @bot.command(name="lock")
 async def lock_command(ctx: commands.Context):
-    if not is_staff(ctx.author):
-        await ctx.send("❌ Cette commande est réservée au staff.")
+    if not is_gerant(ctx.author):
+        await ctx.send("❌ Cette commande est réservée aux Gérants.")
         return
 
     staff_role = discord.utils.get(ctx.guild.roles, name=STAFF_ROLE_NAME)
@@ -1833,8 +1864,8 @@ async def lock_command(ctx: commands.Context):
 
 @bot.command(name="unlock")
 async def unlock_command(ctx: commands.Context):
-    if not is_staff(ctx.author):
-        await ctx.send("❌ Cette commande est réservée au staff.")
+    if not is_gerant(ctx.author):
+        await ctx.send("❌ Cette commande est réservée aux Gérants.")
         return
 
     overwrite_everyone = ctx.channel.overwrites_for(ctx.guild.default_role)
@@ -4662,7 +4693,7 @@ async def before_check_elu_semaine():
 @bot.tree.command(name="clear", description="[Staff] Supprime un nombre de messages dans le salon")
 @app_commands.describe(nombre="Nombre de messages à supprimer (1 à 100)")
 async def clear(interaction: discord.Interaction, nombre: app_commands.Range[int, 1, 100]):
-    if not is_staff(interaction.user):
+    if not is_mod(interaction.user):
         await interaction.response.send_message(
             "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
         )
@@ -4739,8 +4770,8 @@ def clear_warns(guild_id: int, user_id: int) -> int:
 
 @bot.command(name="warn")
 async def warn_command(ctx: commands.Context, cible: str = None, *, reste: str = None):
-    if not is_staff(ctx.author):
-        await ctx.send("❌ Cette commande est réservée au staff.")
+    if not is_helper(ctx.author):
+        await ctx.send("❌ Cette commande est réservée au staff (Helper, Mod ou Gérant).")
         return
  
     if cible is None:
@@ -4816,8 +4847,8 @@ async def unwarn_command(ctx: commands.Context, cible: str = None, numero: str =
     """+unwarn @membre          -> retire le dernier avertissement
        +unwarn @membre 2        -> retire l'avertissement n°2
        +unwarn @membre all      -> retire tous les avertissements"""
-    if not is_staff(ctx.author):
-        await ctx.send("❌ Cette commande est réservée au staff.")
+    if not is_gerant(ctx.author):
+        await ctx.send("❌ Cette commande est réservée aux Gérants (les Helpers et Mods ne peuvent pas retirer de warns).")
         return
 
     if cible is None:
@@ -4915,8 +4946,8 @@ def parse_duration(duree_str: str):
  
 @bot.command(name="mute")
 async def mute_command(ctx: commands.Context, membre: discord.Member = None, duree: str = None, *, raison: str = None):
-    if not is_staff(ctx.author):
-        await ctx.send("❌ Cette commande est réservée au staff.")
+    if not is_mod(ctx.author):
+        await ctx.send("❌ Cette commande est réservée aux Mods et Gérants.")
         return
  
     if membre is None or duree is None:
@@ -4958,8 +4989,8 @@ async def mute_command(ctx: commands.Context, membre: discord.Member = None, dur
  
 @bot.command(name="unmute")
 async def unmute_command(ctx: commands.Context, membre: discord.Member = None):
-    if not is_staff(ctx.author):
-        await ctx.send("❌ Cette commande est réservée au staff.")
+    if not is_mod(ctx.author):
+        await ctx.send("❌ Cette commande est réservée aux Mods et Gérants.")
         return
  
     if membre is None:
@@ -4976,6 +5007,101 @@ async def unmute_command(ctx: commands.Context, membre: discord.Member = None):
         return
  
     await ctx.send(f"🔊 {membre.mention} n'est plus mute.")
+ 
+ 
+# ================================================================
+#                       SYSTÈME DE BAN
+# ================================================================
+#
+# +ban @membre [raison]  : bannit un membre du serveur (réservé aux Gérants).
+# +unban <user_id ou pseudo#tag> [raison] : débannit un utilisateur par son ID
+#                          (un membre banni n'est plus dans le serveur, donc
+#                          on ne peut pas le mentionner avec @, il faut son ID).
+
+@bot.command(name="ban")
+async def ban_command(ctx: commands.Context, membre: discord.Member = None, *, raison: str = None):
+    if not is_gerant(ctx.author):
+        await ctx.send("❌ Cette commande est réservée aux Gérants.")
+        return
+
+    if membre is None:
+        await ctx.send("❌ Utilisation : `+ban @membre [raison]`")
+        return
+
+    if membre.id == ctx.author.id:
+        await ctx.send("❌ Tu ne peux pas te bannir toi-même.")
+        return
+    if membre.top_role >= ctx.guild.me.top_role:
+        await ctx.send("❌ Je ne peux pas bannir ce membre (son rôle est égal ou supérieur au mien).")
+        return
+
+    raison = raison or "Aucune raison précisée."
+
+    try:
+        await membre.send(
+            f"🔨 Tu as été banni de **{ctx.guild.name}**.\nRaison : {raison}"
+        )
+    except discord.HTTPException:
+        pass  # DMs fermés : on bannit quand même, sans bloquer sur l'envoi du message.
+
+    try:
+        await ctx.guild.ban(membre, reason=f"{raison} (par {ctx.author})", delete_message_seconds=0)
+    except discord.Forbidden:
+        await ctx.send("❌ Je n'ai pas la permission de bannir ce membre.")
+        return
+    except discord.HTTPException:
+        await ctx.send("❌ Erreur lors du bannissement.")
+        return
+
+    embed = discord.Embed(title="🔨 Membre banni", color=discord.Color.dark_red())
+    embed.add_field(name="Membre", value=f"{membre.mention} ({membre.id})", inline=True)
+    embed.add_field(name="Modérateur", value=ctx.author.mention, inline=True)
+    embed.add_field(name="Raison", value=raison, inline=False)
+    embed.set_thumbnail(url=membre.display_avatar.url)
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="unban")
+async def unban_command(ctx: commands.Context, user_id: str = None, *, raison: str = None):
+    if not is_gerant(ctx.author):
+        await ctx.send("❌ Cette commande est réservée aux Gérants.")
+        return
+
+    if user_id is None:
+        await ctx.send("❌ Utilisation : `+unban <ID utilisateur> [raison]` (visible dans la liste des bannis Discord).")
+        return
+
+    try:
+        uid = int(user_id.strip("<@!>"))
+    except ValueError:
+        await ctx.send("❌ ID invalide. Utilise l'ID numérique du compte (pas de mention possible pour un membre banni).")
+        return
+
+    try:
+        ban_entry = await ctx.guild.fetch_ban(discord.Object(id=uid))
+    except discord.NotFound:
+        await ctx.send("❌ Cet utilisateur n'est pas banni sur ce serveur.")
+        return
+    except discord.HTTPException:
+        await ctx.send("❌ Erreur lors de la vérification du bannissement.")
+        return
+
+    raison = raison or "Aucune raison précisée."
+
+    try:
+        await ctx.guild.unban(ban_entry.user, reason=f"{raison} (par {ctx.author})")
+    except discord.Forbidden:
+        await ctx.send("❌ Je n'ai pas la permission de débannir ce membre.")
+        return
+    except discord.HTTPException:
+        await ctx.send("❌ Erreur lors du débannissement.")
+        return
+
+    embed = discord.Embed(title="✅ Membre débanni", color=discord.Color.green())
+    embed.add_field(name="Utilisateur", value=f"{ban_entry.user} ({ban_entry.user.id})", inline=True)
+    embed.add_field(name="Modérateur", value=ctx.author.mention, inline=True)
+    embed.add_field(name="Raison", value=raison, inline=False)
+    await ctx.send(embed=embed)
  
  
 # ================================================================
@@ -5131,8 +5257,8 @@ async def add_group(ctx: commands.Context):
  
 @add_group.command(name="role")
 async def add_role_cmd(ctx: commands.Context, membre: discord.Member, *, role: discord.Role):
-    if not is_staff(ctx.author):
-        await ctx.send("❌ Cette commande est réservée au staff.")
+    if not is_gerant(ctx.author):
+        await ctx.send("❌ Cette commande est réservée aux Gérants.")
         return
  
     if role >= ctx.guild.me.top_role:
@@ -5158,8 +5284,8 @@ async def remove_group(ctx: commands.Context):
  
 @remove_group.command(name="role")
 async def remove_role_cmd(ctx: commands.Context, membre: discord.Member, *, role: discord.Role):
-    if not is_staff(ctx.author):
-        await ctx.send("❌ Cette commande est réservée au staff.")
+    if not is_gerant(ctx.author):
+        await ctx.send("❌ Cette commande est réservée aux Gérants.")
         return
  
     if role >= ctx.guild.me.top_role:
