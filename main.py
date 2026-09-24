@@ -28,9 +28,9 @@ DEV_GUILD_ID = 1537139988448153640      # ID de ton serveur, pour une synchro in
 
 # ---- Hiérarchie de modération (Helper < Mod < Gérant) ----
 # Chaque rôle supérieur hérite automatiquement des permissions du rôle inférieur.
-HELPER_ROLE_NAME = "Helper"
-MOD_ROLE_NAME = "Mod"
-GERANT_ROLE_NAME = "Gérant"
+HELPER_ROLE_NAME = "・Modérateur Test"
+MOD_ROLE_NAME = "・Modérateur"
+GERANT_ROLE_NAME = "・Gérant Staff"
  
 # ---- Élu de la semaine ----
 ELU_ROLE_NAME = "👑 Élu de la semaine"
