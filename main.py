@@ -38,7 +38,7 @@ ELU_GIF_URL = "https://media1.tenor.com/m/9BEFbzse_iUAAAAC/hunter-x-hunter-vacuu
 PARIS_TZ = ZoneInfo("Europe/Paris")
 
 # ---- Tickets ----
-TICKETS_CATEGORY_NAME = "🎫 TICKETS"     # Catégorie par défaut où sont créés les salons de tickets
+TICKETS_CATEGORY_NAME = "『🕵️』Ticket Ouvert"     # Catégorie par défaut où sont créés les salons de tickets
 
 # ---- TikTok ----
 TIKTOK_USERNAME = "7vkp2"                # Compte TikTok suivi (https://www.tiktok.com/@7vkp2)
@@ -119,26 +119,17 @@ def add_validator_role(guild_id: int, categorie: str, role_id: int) -> None:
 # ================================================================
  
 NORMAL_COMMANDS = [
-    ("+cmds", "Affiche la liste des commandes disponibles."),
-    ("+invite-stats", "Affiche combien de membres tu as invités sur le serveur."),
-    ("+concept list", "Affiche la liste des notés du Concept."),
-    ("/animal collection", "Affiche les animaux que tu as capturés."),
-    ("/animal classement", "Affiche le classement des meilleurs chasseurs d'animaux."),
-    ("/pet inventory", "Affiche ton inventaire d'animaux capturés."),
-    ("/pet trade [@membre]", "Propose un échange d'animal avec un autre membre."),
-    ("/report envoyer [@membre] [raison]", "Signale discrètement un membre au staff."),
-    ("/guilde create", "Crée une guilde et ouvre le formulaire de création."),
-    ("/guilde info [id]", "Affiche les informations d’une guilde."),
-    ("/guilde invite [@membre]", "Invite un membre dans ta guilde."),
-    ("/guilde join [id]", "Rejoint une guilde publique."),
-    ("/guilde leave", "Quitte ta guilde actuelle."),
-    ("/guilde members", "Affiche les membres de ta guilde."),
-    ("/guilde rename [nom]", "Change le nom de ta guilde au niveau 5, une seule fois."),
-    ("/guilde icon [url]", "Définit l’icône personnalisée de ta guilde (niveau 1)."),
-    ("/guilde classement", "Affiche le classement des guildes (option reset pour les admins)."),
-    ("/guilde boutique", "Affiche la boutique de badges de guilde."),
-    ("/guilde acheter [badge]", "Achète un badge pour ta guilde (fondateur, avec l'argent de la guilde)."),
-    ("/guilde quetes", "Affiche les 2 quêtes de guilde actives et les dernières complétées."),
+ ("🔑 Permissions", [
+        ("+cmds", "Lister toutes les permissions globales disponibles."),
+    ]),
+    ("⚙️ Utilitaires", [
+        ("+ping", "Affiche la latence du bot."),
+        ("+invite-stats", "Affiche combien de membres tu as invités sur le serveur."),
+    ("🎥 Concept", [
+     ("`+concept list`", "Affiche la liste des notés du Concept."),
+     ("📋 Report", [
+    ("`/report envoyer [@membre] [raison]`", "Signale discrètement un membre au staff."),
+     ("📕 Guilde", [
     ("+block guild [id]", "Bloque l'XP d'une guilde adverse 30 min (1200$, 1x/jour, fondateur)."),
     ("+xp fast", "Booste l'XP de ta propre guilde pendant 5 min (1x/jour, fondateur)."),
 ]
@@ -147,68 +138,63 @@ STAFF_COMMANDS = [
     ("+absences", "Ouvre un formulaire pour déclarer une absence."),
     ("+role-react setup", "Crée un message à réactions qui donne des rôles."),
     ("/ticketsetup", "Crée un panneau de tickets personnalisable (staff)."),
-    ("/set updatelogs [salon]", "Définit le salon des nouveautés du bot et y publie le changelog (staff)."),
-    ("/animal config [salon]", "Active le système d'animaux à capturer dans ce salon (staff)."),
-    ("/animal forcespawn", "Force l'apparition immédiate d'un animal (staff)."),
-    ("/pet spawn", "Force l'apparition immédiate d'un animal (staff, alias de /animal forcespawn)."),
     ("/admin panel", "Ouvre le panneau d'administration : boost de chance x10, spawn x10 (staff)."),
-    ("/maintenance serveur", "Active/désactive le mode maintenance : salons privés sauf staff (propriétaire uniquement)."),
     ("/soutiens", "Configure et affiche le panneau des soutiens du serveur (staff)."),
     ("+concept note @membre", "Notez une personne dans la listes des concepts."),
     ("+concept list reset", "Réinitialise la liste Concept."),
-    ("/eludelasemaine", "Affiche les règles de l'Élu de la semaine (staff)."),
-    ("/forcerelu", "Force la sélection immédiate de l'Élu de la semaine (staff)."),
-    ("/clear [nombre]", "Supprime un nombre de messages dans le salon (staff)."),
-    ("+warn @membre <raison>", "Donne un avertissement à un membre."),
-    ("+warn list @membre", "Affiche les avertissements d'un membre."),
-    ("+unwarn @membre [n°/all]", "Retire le dernier avertissement, un numéro précis, ou tous."),
-    ("+mute @membre <durée> [raison]", "Rend un membre muet (ex : 10m, 2h, 1j)."),
-    ("+unmute @membre", "Retire le mute d'un membre."),
-    ("+add role @membre @role", "Ajoute un rôle à un membre."),
-    ("+remove role @membre @role", "Retire un rôle à un membre."),
-    ("+monrole @role", "Auto-attribution de n'importe quel rôle (permission Gérer les rôles)."),
-    ("+lock", "Verrouille le salon : seul le rôle Staff peut y écrire."),
-    ("+unlock", "Déverrouille le salon."),
     ("/report config [salon]", "Définit le salon privé où arrivent les signalements (staff)."),
     ("/report historique [@membre]", "Affiche les signalements reçus contre un membre (staff)."),
     ("/guilde verif", "Affiche les guildes en attente de vérification."),
     ("/guilde delete [id]", "Supprime une guilde par son ID."),
-    ("/guilde classement reset:True", "[Admin] Réinitialise le classement des guildes (sans toucher aux niveaux)."),
-    ("/guilde quetesconfig [salon]", "Définit le salon d'annonce des quêtes de guilde."),
-    ("/bienvenue config [salon] [message]", "Configure le message de bienvenue des nouveaux membres (staff)."),
-    ("/bienvenue test", "Envoie un message de bienvenue de test (staff)."),
-    ("/bienvenue desactiver", "Désactive le message de bienvenue (staff)."),
 ]
 
 # ---- Listes par niveau de permission (Helper < Mod < Gérant) ----
+PERMISSION_LEVELS = {
+    "helper": 90,
+    "mod": 100,
+    "gerant": 110,
+}
+
+PERMISSION_LABELS = {
+    "helper": "Modérateur Test",
+    "mod": "Modérateur",
+    "gerant": "Gérant Staff",
+}
+
 HELPER_COMMANDS = [
-    ("+warn @membre <raison>", "Donne un avertissement à un membre."),
-    ("+warn list @membre", "Affiche les avertissements d'un membre."),
+    ("`+warn @membre <raison>`", "Donne un avertissement à un membre."),
+    ("`+warn list @membre`", "Affiche les avertissements d'un membre."),
 ]
 
 MOD_COMMANDS = HELPER_COMMANDS + [
-    ("+mute @membre <durée> [raison]", "Rend un membre muet (ex : 10m, 2h, 1j)."),
-    ("+unmute @membre", "Retire le mute d'un membre."),
-    ("/clear [nombre]", "Supprime un nombre de messages dans le salon."),
-    ("+giveaway create <durée> <gagnants> <prix>", "Lance un giveaway."),
-    ("+giveaway end/cancel/reroll/update <message_id>", "Gère un giveaway en cours."),
+    ("`+mute @membre <durée> [raison]`", "Rend un membre muet (ex : 10m, 2h, 1j)."),
+    ("`+unmute @membre`", "Retire le mute d'un membre."),
+    ("`+tempban @membre <durée> [raison]`", "Bannit temporairement un membre (ex : 10m, 2h, 1j, 2w)."),
+    ("`/clear [nombre]`", "Supprime un nombre de messages dans le salon."),
 ]
 
 GERANT_COMMANDS = MOD_COMMANDS + [
-    ("+ban @membre [raison]", "Bannit un membre du serveur."),
-    ("+unban <user_id> [raison]", "Débannit un membre par son ID."),
-    ("+lock", "Verrouille le salon (seul le staff peut y écrire)."),
-    ("+unlock", "Déverrouille le salon."),
-    ("+unwarn @membre [n°/all]", "Retire un ou tous les avertissements d'un membre."),
-    ("+add role @membre @role", "Ajoute un rôle à un membre."),
-    ("+remove role @membre @role", "Retire un rôle à un membre."),
+    ("``+ban @membre [raison]`", "Bannit un membre du serveur."),
+    ("``+unban <user_id> [raison]`", "Débannit un membre par son ID."),
+    ("``+lock`", "Verrouille le salon (seul le staff peut y écrire)."),
+    ("``+unlock`", "Déverrouille le salon."),
+    ("``+unwarn @membre [n°/all]`", "Retire un ou tous les avertissements d'un membre."),
+    ("``+add role @membre @role`", "Ajoute un rôle à un membre."),
+    ("``+remove role @membre @role`", "Retire un rôle à un membre."),
+    ("``+tempban @membre <durée> [raison]`", "Bannit temporairement un membre."),
 ]
 
 
-def build_permission_commands_embed(titre: str, couleur: discord.Color, commandes: list) -> discord.Embed:
-    embed = discord.Embed(title=titre, color=couleur)
-    for name, desc in commandes:
-        embed.add_field(name=name, value=desc, inline=False)
+def build_permission_commands_embed(cle_permission: str, couleur: discord.Color, commandes: list) -> discord.Embed:
+    label = PERMISSION_LABELS[cle_permission]
+    niveau = PERMISSION_LEVELS[cle_permission]
+    embed = discord.Embed(
+        title=f"📘 Commandes accessibles avec la permission \"{label}\"",
+        description=f"Niveau : **{niveau}**\nPréfixe : **+**",
+        color=couleur,
+    )
+    lignes = "\n".join(f"`{name}` — {desc}" for name, desc in commandes)
+    embed.add_field(name="🔨 Modération", value=lignes, inline=False)
     return embed
 
 
@@ -274,6 +260,17 @@ class StaffCommandsPaginator(discord.ui.View):
                 pass
 
 
+@bot.command(name="ping")
+async def ping_command(ctx: commands.Context):
+    latence_ms = round(bot.latency * 1000)
+    embed = discord.Embed(
+        title="🏓 Pong !",
+        description=f"Latence du bot : **{latence_ms} ms**",
+        color=discord.Color.blurple(),
+    )
+    await ctx.send(embed=embed)
+
+
 @bot.command(name="cmds")
 async def cmds_command(ctx: commands.Context, sous_commande: str = None):
     if sous_commande and sous_commande.lower() == "staff":
@@ -290,9 +287,7 @@ async def cmds_command(ctx: commands.Context, sous_commande: str = None):
         if not is_helper(ctx.author):
             await ctx.send("❌ Tu n'as pas la permission de voir les commandes Helper.")
             return
-        embed = build_permission_commands_embed(
-            "🟢 Commandes accessibles avec la permission \"Helper\"", discord.Color.green(), HELPER_COMMANDS
-        )
+        embed = build_permission_commands_embed("helper", discord.Color.green(), HELPER_COMMANDS)
         await ctx.send(embed=embed)
         return
 
@@ -300,9 +295,7 @@ async def cmds_command(ctx: commands.Context, sous_commande: str = None):
         if not is_mod(ctx.author):
             await ctx.send("❌ Tu n'as pas la permission de voir les commandes Mod.")
             return
-        embed = build_permission_commands_embed(
-            "🔨 Commandes accessibles avec la permission \"Mod\"", discord.Color.orange(), MOD_COMMANDS
-        )
+        embed = build_permission_commands_embed("mod", discord.Color.orange(), MOD_COMMANDS)
         await ctx.send(embed=embed)
         return
 
@@ -310,9 +303,7 @@ async def cmds_command(ctx: commands.Context, sous_commande: str = None):
         if not is_gerant(ctx.author):
             await ctx.send("❌ Tu n'as pas la permission de voir les commandes Gérant.")
             return
-        embed = build_permission_commands_embed(
-            "👑 Commandes accessibles avec la permission \"Gérant\"", discord.Color.red(), GERANT_COMMANDS
-        )
+        embed = build_permission_commands_embed("gerant", discord.Color.red(), GERANT_COMMANDS)
         await ctx.send(embed=embed)
         return
 
@@ -4088,341 +4079,6 @@ async def check_flood(message: discord.Message) -> None:
  
  
 # ================================================================
-#                    SYSTÈME DE GIVEAWAYS
-# ================================================================
-#
-# +giveaway create <durée> <gagnants> <prix...>  : lance un giveaway dans le
-#                                                   salon actuel avec un bouton
-#                                                   "🎉 Participer".
-# +giveaway end <message_id>                     : termine un giveaway avant
-#                                                   l'heure prévue.
-# +giveaway cancel <message_id>                  : annule un giveaway (aucun
-#                                                   gagnant tiré).
-# +giveaway reroll <message_id>                  : retire un/des nouveau(x)
-#                                                   gagnant(s) sur un giveaway
-#                                                   déjà terminé.
-# +giveaway update <message_id> <gagnants> [prix]: modifie le nombre de
-#                                                   gagnants et/ou le prix
-#                                                   d'un giveaway en cours.
-#
-# Réservé aux Mods et Gérants. L'ID du message (donné après la création) sert
-# de référence pour toutes les autres sous-commandes.
-
-GIVEAWAY_CHECK_INTERVAL_SECONDS = 30
-
-
-def get_giveaways(guild_id: int) -> dict:
-    guild_conf = config.setdefault(str(guild_id), {})
-    return guild_conf.setdefault("giveaways", {})
-
-
-def save_giveaways(guild_id: int, giveaways: dict) -> None:
-    guild_conf = config.setdefault(str(guild_id), {})
-    guild_conf["giveaways"] = giveaways
-    save_config(config)
-
-
-def build_giveaway_embed(data: dict, guild: discord.Guild, ended: bool = False, gagnants_mentions: list | None = None) -> discord.Embed:
-    fin_dt = _parse_dt(data.get("end_time"))
-    nb_participants = len(set(data.get("participants", [])))
-
-    if ended:
-        titre = "🎉 GIVEAWAY TERMINÉ 🎉"
-        couleur = discord.Color.dark_grey()
-        lignes = [f"**Prix : {data['prize']}**", "⏰ Ce giveaway est terminé."]
-    else:
-        titre = "🎉 GIVEAWAY 🎉"
-        couleur = discord.Color.gold()
-        lignes = [f"**Prix : {data['prize']}**"]
-        if fin_dt:
-            lignes.append(f"⏰ Se termine <t:{int(fin_dt.timestamp())}:R>")
-        lignes.append("🎟️ Clique sur le bouton ci-dessous pour participer !")
-
-    lignes.append(f"🏆 Nombre de gagnants : **{data.get('winners_count', 1)}**")
-    lignes.append(f"👥 Participants : **{nb_participants}**")
-
-    embed = discord.Embed(title=titre, description="\n".join(lignes), color=couleur)
-
-    if ended:
-        if gagnants_mentions:
-            embed.add_field(name="🏆 Gagnant(s)", value="\n".join(gagnants_mentions), inline=False)
-        else:
-            embed.add_field(name="🏆 Gagnant(s)", value="Aucun participant valide, aucun gagnant tiré.", inline=False)
-
-    host = guild.get_member(data.get("host_id"))
-    embed.set_footer(text=f"Organisé par {host.display_name if host else data.get('host_id')}")
-    return embed
-
-
-class GiveawayJoinButton(discord.ui.Button):
-    """Bouton persistant (survit aux redémarrages) : le custom_id encode l'ID
-    du message du giveaway pour retrouver sa configuration."""
-
-    def __init__(self, message_id: str):
-        super().__init__(
-            label="🎉 Participer",
-            style=discord.ButtonStyle.success,
-            custom_id=f"giveaway_join:{message_id}",
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        await handle_giveaway_join(interaction, self.custom_id.split(":", 1)[1])
-
-
-def build_giveaway_view(message_id: str) -> discord.ui.View:
-    view = discord.ui.View(timeout=None)
-    view.add_item(GiveawayJoinButton(message_id))
-    return view
-
-
-async def handle_giveaway_join(interaction: discord.Interaction, message_id: str) -> None:
-    if interaction.guild is None:
-        return
-    giveaways = get_giveaways(interaction.guild.id)
-    data = giveaways.get(message_id)
-    if not data or data.get("ended") or data.get("cancelled"):
-        await interaction.response.send_message("❌ Ce giveaway n'est plus actif.", ephemeral=True)
-        return
-
-    participants = data.setdefault("participants", [])
-    uid = interaction.user.id
-    if uid in participants:
-        participants.remove(uid)
-        save_giveaways(interaction.guild.id, giveaways)
-        await interaction.response.send_message("↩️ Tu ne participes plus à ce giveaway.", ephemeral=True)
-    else:
-        participants.append(uid)
-        save_giveaways(interaction.guild.id, giveaways)
-        await interaction.response.send_message("✅ Tu participes maintenant à ce giveaway ! Bonne chance 🍀", ephemeral=True)
-
-
-async def terminer_giveaway(guild: discord.Guild, message_id: str, reroll: bool = False) -> bool:
-    """Tire au sort le(s) gagnant(s) et met à jour le message. Retourne False
-    si le giveaway est introuvable ou déjà terminé (sauf en cas de reroll)."""
-    giveaways = get_giveaways(guild.id)
-    data = giveaways.get(message_id)
-    if not data:
-        return False
-    if data.get("ended") and not reroll:
-        return False
-
-    participants = list(set(data.get("participants", [])))
-    nb_gagnants = min(int(data.get("winners_count", 1)), len(participants))
-    gagnants_ids = random.sample(participants, nb_gagnants) if nb_gagnants > 0 else []
-    gagnants_mentions = [f"<@{uid}>" for uid in gagnants_ids]
-
-    data["ended"] = True
-    save_giveaways(guild.id, giveaways)
-
-    channel = guild.get_channel(data["channel_id"])
-    embed = build_giveaway_embed(data, guild, ended=True, gagnants_mentions=gagnants_mentions)
-
-    if channel:
-        try:
-            message = await channel.fetch_message(int(message_id))
-            await message.edit(embed=embed, view=None)
-        except (discord.NotFound, discord.HTTPException):
-            pass
-
-        try:
-            if gagnants_mentions:
-                prefixe = "🔄 Nouveau tirage !" if reroll else "🎉 Le giveaway est terminé !"
-                await channel.send(
-                    f"{prefixe} Félicitations {', '.join(gagnants_mentions)}, "
-                    f"tu remportes **{data['prize']}** !"
-                )
-            else:
-                await channel.send(f"😢 Aucun participant valide pour le giveaway **{data['prize']}**, pas de gagnant.")
-        except discord.HTTPException:
-            pass
-
-    return True
-
-
-@tasks.loop(seconds=GIVEAWAY_CHECK_INTERVAL_SECONDS)
-async def check_giveaways_loop():
-    now = datetime.now(PARIS_TZ)
-    for guild in bot.guilds:
-        giveaways = config.get(str(guild.id), {}).get("giveaways", {})
-        for message_id, data in list(giveaways.items()):
-            if data.get("ended") or data.get("cancelled"):
-                continue
-            fin = _parse_dt(data.get("end_time"))
-            if fin and now >= fin:
-                try:
-                    await terminer_giveaway(guild, message_id)
-                except Exception as e:
-                    print(f"⚠️ Erreur lors de la fin du giveaway {message_id} : {e}")
-
-
-@check_giveaways_loop.before_loop
-async def before_check_giveaways_loop():
-    await bot.wait_until_ready()
-
-
-@bot.group(name="giveaway", invoke_without_command=True)
-async def giveaway_group(ctx: commands.Context):
-    await ctx.send(
-        "❌ Utilise :\n"
-        "`+giveaway create <durée> <gagnants> <prix>` — Lance un giveaway\n"
-        "`+giveaway end <message_id>` — Termine un giveaway immédiatement\n"
-        "`+giveaway cancel <message_id>` — Annule un giveaway (pas de gagnant)\n"
-        "`+giveaway reroll <message_id>` — Retire un nouveau gagnant\n"
-        "`+giveaway update <message_id> <gagnants> [prix]` — Modifie un giveaway en cours"
-    )
-
-
-@giveaway_group.command(name="create")
-async def giveaway_create_cmd(ctx: commands.Context, duree: str = None, gagnants: int = None, *, prix: str = None):
-    if not is_mod(ctx.author):
-        await ctx.send("❌ Cette commande est réservée aux Mods et Gérants.")
-        return
-
-    if duree is None or gagnants is None or not prix:
-        await ctx.send("❌ Utilisation : `+giveaway create <durée ex: 10m/2h/1j> <nombre de gagnants> <prix>`")
-        return
-
-    secondes = parse_duration(duree)
-    if secondes is None:
-        await ctx.send("❌ Durée invalide. Utilise un format comme `10m`, `2h`, `1j`.")
-        return
-    if gagnants < 1:
-        await ctx.send("❌ Le nombre de gagnants doit être au moins 1.")
-        return
-
-    fin = datetime.now(PARIS_TZ) + timedelta(seconds=secondes)
-    data = {
-        "channel_id": ctx.channel.id,
-        "prize": prix,
-        "winners_count": gagnants,
-        "end_time": fin.isoformat(),
-        "participants": [],
-        "host_id": ctx.author.id,
-        "ended": False,
-        "cancelled": False,
-    }
-
-    embed = build_giveaway_embed(data, ctx.guild)
-    message = await ctx.send(embed=embed)
-
-    view = build_giveaway_view(str(message.id))
-    await message.edit(view=view)
-
-    giveaways = get_giveaways(ctx.guild.id)
-    giveaways[str(message.id)] = data
-    save_giveaways(ctx.guild.id, giveaways)
-
-    await ctx.send(
-        f"✅ Giveaway lancé ! ID à retenir pour le gérer : `{message.id}`",
-        delete_after=20,
-    )
-
-
-@giveaway_group.command(name="end")
-async def giveaway_end_cmd(ctx: commands.Context, message_id: str = None):
-    if not is_mod(ctx.author):
-        await ctx.send("❌ Cette commande est réservée aux Mods et Gérants.")
-        return
-    if message_id is None:
-        await ctx.send("❌ Utilisation : `+giveaway end <message_id>`")
-        return
-
-    ok = await terminer_giveaway(ctx.guild, message_id)
-    if not ok:
-        await ctx.send("❌ Giveaway introuvable ou déjà terminé.")
-        return
-    await ctx.send("✅ Giveaway terminé manuellement.")
-
-
-@giveaway_group.command(name="cancel")
-async def giveaway_cancel_cmd(ctx: commands.Context, message_id: str = None):
-    if not is_mod(ctx.author):
-        await ctx.send("❌ Cette commande est réservée aux Mods et Gérants.")
-        return
-    if message_id is None:
-        await ctx.send("❌ Utilisation : `+giveaway cancel <message_id>`")
-        return
-
-    giveaways = get_giveaways(ctx.guild.id)
-    data = giveaways.get(message_id)
-    if not data or data.get("ended") or data.get("cancelled"):
-        await ctx.send("❌ Giveaway introuvable ou déjà terminé.")
-        return
-
-    data["cancelled"] = True
-    save_giveaways(ctx.guild.id, giveaways)
-
-    channel = ctx.guild.get_channel(data["channel_id"])
-    if channel:
-        try:
-            message = await channel.fetch_message(int(message_id))
-            embed = discord.Embed(
-                title="🚫 Giveaway annulé",
-                description=f"Le giveaway **{data['prize']}** a été annulé par le staff.",
-                color=discord.Color.red(),
-            )
-            await message.edit(embed=embed, view=None)
-        except (discord.NotFound, discord.HTTPException):
-            pass
-
-    await ctx.send("✅ Giveaway annulé, aucun gagnant ne sera tiré.")
-
-
-@giveaway_group.command(name="reroll")
-async def giveaway_reroll_cmd(ctx: commands.Context, message_id: str = None):
-    if not is_mod(ctx.author):
-        await ctx.send("❌ Cette commande est réservée aux Mods et Gérants.")
-        return
-    if message_id is None:
-        await ctx.send("❌ Utilisation : `+giveaway reroll <message_id>`")
-        return
-
-    giveaways = get_giveaways(ctx.guild.id)
-    data = giveaways.get(message_id)
-    if not data or not data.get("ended") or data.get("cancelled"):
-        await ctx.send("❌ Ce giveaway doit d'abord être terminé (`+giveaway end`) avant de pouvoir le reroll.")
-        return
-
-    await terminer_giveaway(ctx.guild, message_id, reroll=True)
-    await ctx.send("🔄 Nouveau tirage effectué.")
-
-
-@giveaway_group.command(name="update")
-async def giveaway_update_cmd(ctx: commands.Context, message_id: str = None, gagnants: int = None, *, prix: str = None):
-    if not is_mod(ctx.author):
-        await ctx.send("❌ Cette commande est réservée aux Mods et Gérants.")
-        return
-    if message_id is None or gagnants is None:
-        await ctx.send("❌ Utilisation : `+giveaway update <message_id> <nombre de gagnants> [nouveau prix]`")
-        return
-    if gagnants < 1:
-        await ctx.send("❌ Le nombre de gagnants doit être au moins 1.")
-        return
-
-    giveaways = get_giveaways(ctx.guild.id)
-    data = giveaways.get(message_id)
-    if not data or data.get("ended") or data.get("cancelled"):
-        await ctx.send("❌ Giveaway introuvable ou déjà terminé.")
-        return
-
-    data["winners_count"] = gagnants
-    if prix:
-        data["prize"] = prix
-    save_giveaways(ctx.guild.id, giveaways)
-
-    channel = ctx.guild.get_channel(data["channel_id"])
-    if channel:
-        try:
-            message = await channel.fetch_message(int(message_id))
-            embed = build_giveaway_embed(data, ctx.guild)
-            await message.edit(embed=embed)
-        except (discord.NotFound, discord.HTTPException):
-            pass
-
-    await ctx.send("✅ Giveaway mis à jour.")
-
-
-# ================================================================
 #                      +stats serveur
 # ================================================================
  
@@ -5357,8 +5013,8 @@ async def unwarn_command(ctx: commands.Context, cible: str = None, numero: str =
  
  
 def parse_duration(duree_str: str):
-    """Convertit '10m', '2h', '1j'/'1d', '30s' en secondes. Retourne None si invalide."""
-    unites = {"s": 1, "m": 60, "h": 3600, "j": 86400, "d": 86400}
+    """Convertit '10m', '2h', '1j'/'1d', '30s', '2w' (semaine) en secondes. Retourne None si invalide."""
+    unites = {"s": 1, "m": 60, "h": 3600, "j": 86400, "d": 86400, "w": 7 * 86400}
     if not duree_str or len(duree_str) < 2:
         return None
     unite = duree_str[-1].lower()
@@ -5529,6 +5185,104 @@ async def unban_command(ctx: commands.Context, user_id: str = None, *, raison: s
     embed.add_field(name="Modérateur", value=ctx.author.mention, inline=True)
     embed.add_field(name="Raison", value=raison, inline=False)
     await ctx.send(embed=embed)
+ 
+ 
+# ---------------- +tempban (réservé aux Modérateurs et Gérants) ----------------
+#
+# Contrairement à +ban (permanent, Gérants uniquement), +tempban est accessible
+# dès le niveau Modérateur : le membre est banni puis automatiquement débanni
+# à l'expiration de la durée (vérifiée toutes les minutes en arrière-plan).
+
+def get_tempbans(guild_id: int) -> dict:
+    guild_conf = config.setdefault(str(guild_id), {})
+    return guild_conf.setdefault("tempbans", {})
+
+
+def save_tempbans(guild_id: int, tempbans: dict) -> None:
+    guild_conf = config.setdefault(str(guild_id), {})
+    guild_conf["tempbans"] = tempbans
+    save_config(config)
+
+
+@bot.command(name="tempban")
+async def tempban_command(ctx: commands.Context, membre: discord.Member = None, duree: str = None, *, raison: str = None):
+    if not is_mod(ctx.author):
+        await ctx.send("❌ Cette commande est réservée aux Modérateurs et Gérants.")
+        return
+
+    if membre is None or duree is None:
+        await ctx.send("❌ Utilisation : `+tempban @membre <durée ex: 10m/2h/1j/2w> [raison]`")
+        return
+
+    if membre.id == ctx.author.id:
+        await ctx.send("❌ Tu ne peux pas te bannir toi-même.")
+        return
+    if membre.top_role >= ctx.guild.me.top_role:
+        await ctx.send("❌ Je ne peux pas bannir ce membre (son rôle est égal ou supérieur au mien).")
+        return
+
+    secondes = parse_duration(duree)
+    if secondes is None:
+        await ctx.send("❌ Durée invalide. Utilise un format comme `10m`, `2h`, `1j`, `2w` (semaine).")
+        return
+
+    raison = raison or "Aucune raison précisée."
+    fin = datetime.now(PARIS_TZ) + timedelta(seconds=secondes)
+
+    try:
+        await membre.send(
+            f"🔨 Tu as été banni temporairement de **{ctx.guild.name}** pour {duree}.\nRaison : {raison}"
+        )
+    except discord.HTTPException:
+        pass
+
+    try:
+        await ctx.guild.ban(membre, reason=f"{raison} (tempban par {ctx.author}, {duree})", delete_message_seconds=0)
+    except discord.Forbidden:
+        await ctx.send("❌ Je n'ai pas la permission de bannir ce membre.")
+        return
+    except discord.HTTPException:
+        await ctx.send("❌ Erreur lors du bannissement.")
+        return
+
+    tempbans = get_tempbans(ctx.guild.id)
+    tempbans[str(membre.id)] = {
+        "unban_at": fin.isoformat(),
+        "moderator_id": str(ctx.author.id),
+        "raison": raison,
+    }
+    save_tempbans(ctx.guild.id, tempbans)
+
+    embed = discord.Embed(title="⏱️ Membre banni temporairement", color=discord.Color.dark_orange())
+    embed.add_field(name="Membre", value=f"{membre.mention} ({membre.id})", inline=True)
+    embed.add_field(name="Modérateur", value=ctx.author.mention, inline=True)
+    embed.add_field(name="Durée", value=duree, inline=True)
+    embed.add_field(name="Raison", value=raison, inline=False)
+    embed.set_footer(text=f"Débanni automatiquement le {fin.strftime('%d/%m/%Y à %H:%M')} (heure de Paris)")
+    embed.set_thumbnail(url=membre.display_avatar.url)
+    await ctx.send(embed=embed)
+
+
+@tasks.loop(minutes=1)
+async def check_tempbans_loop():
+    now = datetime.now(PARIS_TZ)
+    for guild in bot.guilds:
+        tempbans = config.get(str(guild.id), {}).get("tempbans", {})
+        for user_id_str, data in list(tempbans.items()):
+            fin = _parse_dt(data.get("unban_at"))
+            if not fin or now < fin:
+                continue
+            try:
+                await guild.unban(discord.Object(id=int(user_id_str)), reason="Fin du bannissement temporaire (+tempban)")
+            except (discord.NotFound, discord.HTTPException):
+                pass
+            del tempbans[user_id_str]
+            save_tempbans(guild.id, tempbans)
+
+
+@check_tempbans_loop.before_loop
+async def before_check_tempbans_loop():
+    await bot.wait_until_ready()
  
  
 # ================================================================
@@ -6124,6 +5878,12 @@ async def on_ready():
 
     if not check_quetes_loop.is_running():
         check_quetes_loop.start()
+
+    if not check_tempbans_loop.is_running():
+        check_tempbans_loop.start()
+
+    if not rotation_statut.is_running():
+        rotation_statut.start()
 
     print(f"✅ Connecté en tant que {bot.user}")
  
