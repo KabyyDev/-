@@ -4479,13 +4479,6 @@ async def bienvenue_desactiver_cmd(interaction: discord.Interaction):
 
 
 bot.tree.add_command(bienvenue_group)
-# ================================================================
-#              FORMULAIRE DE CANDIDATURE (/form mod)
-# ================================================================
-#
-# /form mod ouvre 3 fenêtres (modals) à la suite pour candidater au poste de
-# Modérateur, puis envoie les réponses compilées dans le salon configuré par
-# le staff via /form config.
 
 class FormModStep3Modal(discord.ui.Modal, title="Candidature Modérateur (3/3)"):
     complement = discord.ui.TextInput(
@@ -4502,6 +4495,23 @@ class FormModStep3Modal(discord.ui.Modal, title="Candidature Modérateur (3/3)")
     async def on_submit(self, interaction: discord.Interaction):
         self.reponses["complement"] = self.complement.value or "Rien à ajouter."
         await envoyer_candidature_mod(interaction, self.reponses)
+
+
+class FormModContinueView(discord.ui.View):
+    """Bouton intermédiaire obligatoire entre deux fenêtres : Discord interdit
+    d'ouvrir un nouveau modal directement depuis la soumission d'un autre
+    modal, il faut d'abord passer par un clic de bouton (interaction de type
+    message_component, qui autorise send_modal)."""
+
+    def __init__(self, next_modal_factory, reponses: dict):
+        super().__init__(timeout=300)
+        self.next_modal_factory = next_modal_factory
+        self.reponses = reponses
+
+    @discord.ui.button(label="Continuer ➡️", style=discord.ButtonStyle.primary)
+    async def continuer(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.send_modal(self.next_modal_factory(self.reponses))
 
 
 class FormModStep2Modal(discord.ui.Modal, title="Candidature Modérateur (2/3)"):
@@ -4523,7 +4533,11 @@ class FormModStep2Modal(discord.ui.Modal, title="Candidature Modérateur (2/3)")
     async def on_submit(self, interaction: discord.Interaction):
         self.reponses["pourquoi"] = self.pourquoi.value
         self.reponses["role_selon_toi"] = self.role_selon_toi.value
-        await interaction.response.send_modal(FormModStep3Modal(self.reponses))
+        await interaction.response.send_message(
+            "✅ Étape 2/3 reçue ! Clique ci-dessous pour la dernière étape.",
+            view=FormModContinueView(FormModStep3Modal, self.reponses),
+            ephemeral=True,
+        )
 
 
 class FormModStep1Modal(discord.ui.Modal, title="Candidature Modérateur (1/3)"):
@@ -4541,7 +4555,11 @@ class FormModStep1Modal(discord.ui.Modal, title="Candidature Modérateur (1/3)")
             "age": self.age.value,
             "disponibilites": self.disponibilites.value,
         }
-        await interaction.response.send_modal(FormModStep2Modal(reponses))
+        await interaction.response.send_message(
+            "✅ Étape 1/3 reçue ! Clique ci-dessous pour continuer.",
+            view=FormModContinueView(FormModStep2Modal, reponses),
+            ephemeral=True,
+        )
 
 
 async def envoyer_candidature_mod(interaction: discord.Interaction, reponses: dict) -> None:
