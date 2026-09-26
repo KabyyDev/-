@@ -20,7 +20,7 @@ load_dotenv()
 # ================================================================
 PREFIX = "+"
 
-STAFF_ROLE_NAME = "Ping staff"          # Nom exact du rôle staff sur ton serveur (utilisé pour tickets, guildes, etc.)
+STAFF_ROLE_NAME = "STAFF"          # Nom exact du rôle staff sur ton serveur (utilisé pour tickets, guildes, etc.)
 STATS_CATEGORY_NAME = "🧽 SERVEUR STATS"
 STATS_UPDATE_INTERVAL_MINUTES = 10      # Discord limite les renommages de salons (~2 / 10 min)
 CONFIG_FILE = "config.json"             # Stockage persistant des rôles autorisés à valider
