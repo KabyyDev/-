@@ -132,6 +132,7 @@ NORMAL_COMMANDS = [
      ("📕 Guilde", [
     ("+block guild [id]", "Bloque l'XP d'une guilde adverse 30 min (1200$, 1x/jour, fondateur)."),
     ("+xp fast", "Booste l'XP de ta propre guilde pendant 5 min (1x/jour, fondateur)."),
+      )
 ]
  
 STAFF_COMMANDS = [
