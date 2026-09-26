@@ -6181,7 +6181,7 @@ async def on_ready():
     if not check_tempbans_loop.is_running():
         check_tempbans_loop.start()
 
-     if not check_giveaways.is_running():
+    if not check_giveaways.is_running():
         check_giveaways.start()
 
     if not rotation_statut.is_running():
