@@ -112,7 +112,188 @@ def add_validator_role(guild_id: int, categorie: str, role_id: int) -> None:
     if role_id not in roles:
         roles.append(role_id)
     save_config(config)
- 
+
+# ================================================================
+#                        /form mod
+# ================================================================
+# Formulaire de candidature Modérateur en 3 fenêtres (modals),
+# reliées par des boutons (Discord ne permet pas de rouvrir un
+# modal directement depuis le on_submit d'un autre modal).
+# ================================================================
+
+FORM_CONFIG_FILE = "form_config.json"
+
+
+def load_form_config() -> dict:
+    if os.path.exists(FORM_CONFIG_FILE):
+        with open(FORM_CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def save_form_config(data: dict) -> None:
+    with open(FORM_CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+form_config = load_form_config()
+
+# Stockage temporaire des réponses en cours (en mémoire, par utilisateur)
+form_sessions: dict[int, dict] = {}
+
+
+def get_form_channel_id(guild_id: int) -> int | None:
+    return form_config.get(str(guild_id))
+
+
+def set_form_channel_id(guild_id: int, channel_id: int) -> None:
+    form_config[str(guild_id)] = channel_id
+    save_form_config(form_config)
+
+
+# ---------------- Fenêtre 1 ----------------
+
+class ModMod1(discord.ui.Modal, title="Candidature Modérateur (1/3)"):
+    pseudo = discord.ui.TextInput(label="Quel est ton pseudo Discord ?", max_length=100)
+    age = discord.ui.TextInput(label="Quel âge as-tu ?", max_length=10)
+    dispo = discord.ui.TextInput(
+        label="Tes disponibilités",
+        style=discord.TextStyle.paragraph,
+        placeholder="Ex : Tous les soirs après 18h, week-ends...",
+        max_length=300,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        form_sessions[interaction.user.id] = {
+            "pseudo": self.pseudo.value,
+            "age": self.age.value,
+            "dispo": self.dispo.value,
+        }
+        await interaction.response.send_message(
+            "✅ Étape 1/3 terminée. Clique sur le bouton pour continuer.",
+            view=ContinueView(step=2),
+            ephemeral=True,
+        )
+
+
+# ---------------- Fenêtre 2 ----------------
+
+class ModMod2(discord.ui.Modal, title="Candidature Modérateur (2/3)"):
+    pourquoi = discord.ui.TextInput(
+        label="Pourquoi devenir Modérateur ?",
+        style=discord.TextStyle.paragraph,
+        max_length=500,
+    )
+    role = discord.ui.TextInput(
+        label='Pour toi, en quoi consiste le rôle de "Modérateur" ?',
+        style=discord.TextStyle.paragraph,
+        max_length=500,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        session = form_sessions.setdefault(interaction.user.id, {})
+        session["pourquoi"] = self.pourquoi.value
+        session["role"] = self.role.value
+        await interaction.response.send_message(
+            "✅ Étape 2/3 terminée. Clique sur le bouton pour continuer.",
+            view=ContinueView(step=3),
+            ephemeral=True,
+        )
+
+
+# ---------------- Fenêtre 3 ----------------
+
+class ModMod3(discord.ui.Modal, title="Candidature Modérateur (3/3)"):
+    plus = discord.ui.TextInput(
+        label="Quelque chose à rajouter ?",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=500,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        session = form_sessions.pop(interaction.user.id, {})
+        session["plus"] = self.plus.value or "Aucune précision."
+
+        channel_id = get_form_channel_id(interaction.guild.id)
+        if channel_id is None:
+            await interaction.response.send_message(
+                "❌ Aucun salon n'a été configuré pour recevoir les candidatures. "
+                "Un membre du staff doit d'abord faire `/form setup`.",
+                ephemeral=True,
+            )
+            return
+
+        channel = interaction.guild.get_channel(channel_id)
+        if channel is None:
+            await interaction.response.send_message(
+                "❌ Le salon configuré n'existe plus. Un membre du staff doit refaire `/form setup`.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title="🛡️ Nouvelle candidature — Modérateur",
+            color=discord.Color.blue(),
+            timestamp=datetime.utcnow(),
+        )
+        embed.add_field(name="Pseudo Discord", value=session.get("pseudo", "—"), inline=True)
+        embed.add_field(name="Âge", value=session.get("age", "—"), inline=True)
+        embed.add_field(name="Disponibilités", value=session.get("dispo", "—"), inline=False)
+        embed.add_field(name="Pourquoi devenir Modérateur ?", value=session.get("pourquoi", "—"), inline=False)
+        embed.add_field(name="Vision du rôle de Modérateur", value=session.get("role", "—"), inline=False)
+        embed.add_field(name="Ajout(s)", value=session.get("plus", "—"), inline=False)
+        embed.set_footer(
+            text=f"Candidat : {interaction.user} ({interaction.user.id})",
+            icon_url=interaction.user.display_avatar.url,
+        )
+
+        await channel.send(embed=embed)
+        await interaction.response.send_message(
+            "✅ Ta candidature a bien été envoyée. Merci !",
+            ephemeral=True,
+        )
+
+
+# ---------------- Bouton "Continuer" entre chaque fenêtre ----------------
+
+class ContinueView(discord.ui.View):
+    def __init__(self, step: int):
+        super().__init__(timeout=300)
+        self.step = step
+
+    @discord.ui.button(label="Continuer ➡️", style=discord.ButtonStyle.primary)
+    async def continue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.step == 2:
+            await interaction.response.send_modal(ModMod2())
+        elif self.step == 3:
+            await interaction.response.send_modal(ModMod3())
+        self.stop()
+
+
+# ---------------- Commandes slash ----------------
+
+form_group = app_commands.Group(name="form", description="Formulaires de candidature")
+
+
+@form_group.command(name="mod", description="Postuler pour devenir Modérateur")
+async def form_mod(interaction: discord.Interaction):
+    await interaction.response.send_modal(ModMod1())
+
+
+@form_group.command(name="setup", description="[Staff] Choisit le salon où seront envoyées les candidatures Modérateur")
+@app_commands.describe(salon="Le salon qui recevra les candidatures")
+async def form_setup(interaction: discord.Interaction, salon: discord.TextChannel):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message("❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
+        return
+
+    set_form_channel_id(interaction.guild.id, salon.id)
+    await interaction.response.send_message(f"✅ Les candidatures Modérateur seront désormais envoyées dans {salon.mention}.", ephemeral=True)
+
+
+bot.tree.add_command(form_group)
+
  
 # ================================================================
 #                          +cmds
