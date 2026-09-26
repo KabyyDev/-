@@ -4657,6 +4657,17 @@ async def on_member_join(member: discord.Member):
     # part même si le bot n'a pas la permission de lire les invitations.
     await envoyer_message_bienvenue(member)
 
+     # ---- Ping puis suppression immédiate (/mentionjoin) ----
+    mentionjoin_channel_id = config.get(str(guild.id), {}).get("mentionjoin_channel_id")
+    if mentionjoin_channel_id:
+        mentionjoin_channel = guild.get_channel(mentionjoin_channel_id)
+        if mentionjoin_channel:
+            try:
+                ping_msg = await mentionjoin_channel.send(member.mention)
+                await ping_msg.delete()
+            except discord.HTTPException:
+                pass
+
     # ---- Suivi des invitations ----
     old_invites = invites_cache.get(guild.id, {})
 
@@ -4960,14 +4971,23 @@ async def clear(interaction: discord.Interaction, nombre: app_commands.Range[int
  
     await interaction.followup.send(f"✅ {len(supprimes)} message(s) supprimé(s).", ephemeral=True)
  
-@bot.tree.command(name="mentionjoin", description="[Staff] Ping un membre puis supprime immédiatement le message")
-@app_commands.describe(membre="Le membre à ping")
-async def mentionjoin_cmd(interaction: discord.Interaction, membre: discord.Member):
+@bot.tree.command(name="mentionjoin", description="[Staff] Définit le salon où ping+supprimer chaque nouveau membre")
+@app_commands.describe(salon="Salon où le nouveau membre sera ping puis le message supprimé")
+async def mentionjoin_cmd(interaction: discord.Interaction, salon: discord.TextChannel):
     if not is_staff(interaction.user):
         await interaction.response.send_message(
             "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
         )
         return
+
+    guild_conf = config.setdefault(str(interaction.guild.id), {})
+    guild_conf["mentionjoin_channel_id"] = salon.id
+    save_config(config)
+
+    await interaction.response.send_message(
+        f"✅ Chaque nouveau membre sera désormais ping puis le message supprimé immédiatement dans {salon.mention}.",
+        ephemeral=True,
+    )
 
     await interaction.response.send_message(membre.mention)
     await interaction.delete_original_response()
