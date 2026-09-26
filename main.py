@@ -4960,6 +4960,17 @@ async def clear(interaction: discord.Interaction, nombre: app_commands.Range[int
  
     await interaction.followup.send(f"✅ {len(supprimes)} message(s) supprimé(s).", ephemeral=True)
  
+ @bot.tree.command(name="mentionjoin", description="[Staff] Ping un membre puis supprime immédiatement le message")
+@app_commands.describe(membre="Le membre à ping")
+async def mentionjoin_cmd(interaction: discord.Interaction, membre: discord.Member):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message(
+            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(membre.mention)
+    await interaction.delete_original_response()
  
 # ================================================================
 #                       MODÉRATION
