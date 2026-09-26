@@ -5829,6 +5829,298 @@ async def before_rotation_statut():
     await bot.wait_until_ready()
 
 # ================================================================
+#                       SYSTÈME DE GIVEAWAYS
+# ================================================================
+#
+# Le staff lance un giveaway avec /giveaway start : lot, durée, nombre de
+# gagnants, et un emoji au choix (classique 🎉 ou emoji personnalisé du
+# serveur <:nom:id>) pour participer. Les membres réagissent avec cet emoji
+# sur le message pour s'inscrire. À l'expiration, un ou plusieurs gagnants
+# sont tirés au hasard parmi les membres ayant réagi.
+#
+# Persistant : les giveaways en cours sont stockés dans config.json, donc
+# un redémarrage du bot ne les fait pas disparaître (le message est
+# re-récupéré via son ID au moment du tirage).
+#
+# NOTE D'INTÉGRATION :
+# - Colle ce bloc avant la section "EVENTS" de ton script.
+# - Dans `on_ready`, ajoute :
+#       if not check_giveaways.is_running():
+#           check_giveaways.start()
+# - Réutilise tes fonctions déjà existantes : parse_duration, _parse_dt,
+#   PARIS_TZ, is_staff, save_config, config.
+
+GIVEAWAY_CHECK_INTERVAL_MINUTES = 1
+GIVEAWAY_EMOJI_DEFAUT = "🎉"
+
+
+# ---------------- Emoji ----------------
+
+def parse_emoji_giveaway(guild: discord.Guild, emoji_str: str):
+    """Convertit la saisie en emoji utilisable pour réagir : soit un emoji
+    unicode classique, soit un emoji personnalisé du serveur (<:nom:id>).
+    Retourne None si l'emoji personnalisé demandé n'existe pas sur ce serveur."""
+    emoji_str = emoji_str.strip()
+    match = re.match(r"^<a?:\w+:(\d+)>$", emoji_str)
+    if match:
+        emoji_id = int(match.group(1))
+        return discord.utils.get(guild.emojis, id=emoji_id)
+    return emoji_str  # emoji unicode classique (ex : 🎉, 🔥, 🍀...)
+
+
+# ---------------- Embeds ----------------
+
+def build_giveaway_embed(prix: str, fin: datetime, nb_gagnants: int, emoji, host: discord.abc.User, termine: bool = False) -> discord.Embed:
+    embed = discord.Embed(
+        title="🎉 GIVEAWAY TERMINÉ 🎉" if termine else "🎉 GIVEAWAY 🎉",
+        description=(
+            f"🎁 **Lot :** {prix}\n"
+            f"🏆 **Nombre de gagnants :** {nb_gagnants}\n"
+            f"👤 **Organisé par :** {host.mention}\n"
+            f"⏰ **Fin :** <t:{int(fin.timestamp())}:R>\n\n"
+            + ("Ce giveaway est terminé." if termine else f"Réagis avec {emoji} pour participer !")
+        ),
+        color=discord.Color.dark_grey() if termine else discord.Color.fuchsia(),
+    )
+    return embed
+
+
+def build_resultat_embed(prix: str, gagnants: list) -> discord.Embed:
+    if gagnants:
+        mentions = ", ".join(g.mention for g in gagnants)
+        description = f"Félicitations {mentions} ! Vous remportez **{prix}** ! 🎉"
+        couleur = discord.Color.gold()
+    else:
+        description = f"😢 Personne n'a participé au giveaway **{prix}**... Aucun gagnant."
+        couleur = discord.Color.dark_grey()
+
+    return discord.Embed(title="🏆 Résultat du giveaway", description=description, color=couleur)
+
+
+# ---------------- Tirage ----------------
+
+async def recuperer_participants(message: discord.Message, emoji_str: str) -> list:
+    """Retourne la liste des membres (hors bots) ayant réagi avec l'emoji du giveaway."""
+    for reaction in message.reactions:
+        if str(reaction.emoji) == emoji_str:
+            participants = []
+            async for user in reaction.users():
+                if not user.bot:
+                    participants.append(user)
+            return participants
+    return []
+
+
+async def terminer_giveaway(guild: discord.Guild, message_id: str, data: dict) -> None:
+    channel = guild.get_channel(data["channel_id"])
+    if channel is None:
+        data["termine"] = True
+        return
+
+    try:
+        message = await channel.fetch_message(int(message_id))
+    except (discord.NotFound, discord.HTTPException):
+        data["termine"] = True
+        return
+
+    participants = await recuperer_participants(message, data["emoji"])
+    nb_gagnants = min(data["winners_count"], len(participants))
+    gagnants = random.sample(participants, nb_gagnants) if nb_gagnants > 0 else []
+
+    data["termine"] = True
+    data["gagnants_ids"] = [g.id for g in gagnants]
+
+    # Met à jour le message original pour indiquer qu'il est terminé.
+    try:
+        fin = _parse_dt(data["end_at"])
+        host = guild.get_member(data["host_id"])
+        embed_original = build_giveaway_embed(data["prize"], fin, data["winners_count"], data["emoji"], host or guild.me, termine=True)
+        await message.edit(embed=embed_original)
+    except discord.HTTPException:
+        pass
+
+    try:
+        await channel.send(embed=build_resultat_embed(data["prize"], gagnants))
+    except discord.HTTPException:
+        pass
+
+
+@tasks.loop(minutes=GIVEAWAY_CHECK_INTERVAL_MINUTES)
+async def check_giveaways():
+    now = datetime.now(PARIS_TZ)
+    for guild in bot.guilds:
+        guild_conf = config.get(str(guild.id), {})
+        giveaways = guild_conf.get("giveaways", {})
+        if not giveaways:
+            continue
+
+        changed = False
+        for message_id, data in list(giveaways.items()):
+            if data.get("termine"):
+                continue
+            fin = _parse_dt(data.get("end_at"))
+            if not fin or now < fin:
+                continue
+            await terminer_giveaway(guild, message_id, data)
+            changed = True
+
+        if changed:
+            guild_conf["giveaways"] = giveaways
+            save_config(config)
+
+
+@check_giveaways.before_loop
+async def before_check_giveaways():
+    await bot.wait_until_ready()
+
+
+# ---------------- Commandes ----------------
+
+giveaway_group = app_commands.Group(name="giveaway", description="Système de giveaways")
+
+
+@giveaway_group.command(name="start", description="[Staff] Démarre un giveaway")
+@app_commands.describe(
+    prix="Le lot à gagner",
+    duree="Durée du giveaway (ex : 10m, 2h, 1j)",
+    gagnants="Nombre de gagnants (1 par défaut)",
+    emoji="Emoji pour participer (🎉 par défaut, ou un emoji personnalisé du serveur)",
+)
+async def giveaway_start_cmd(
+    interaction: discord.Interaction,
+    prix: str,
+    duree: str,
+    gagnants: app_commands.Range[int, 1, 20] = 1,
+    emoji: str = GIVEAWAY_EMOJI_DEFAUT,
+):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message("❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
+        return
+
+    secondes = parse_duration(duree)
+    if secondes is None:
+        await interaction.response.send_message("❌ Durée invalide. Utilise un format comme `10m`, `2h`, `1j`.", ephemeral=True)
+        return
+
+    emoji_valide = parse_emoji_giveaway(interaction.guild, emoji)
+    if emoji_valide is None:
+        await interaction.response.send_message("❌ Cet emoji personnalisé n'existe pas sur ce serveur.", ephemeral=True)
+        return
+
+    fin = datetime.now(PARIS_TZ) + timedelta(seconds=secondes)
+    embed = build_giveaway_embed(prix, fin, gagnants, emoji_valide, interaction.user)
+
+    await interaction.response.send_message("✅ Giveaway lancé !", ephemeral=True)
+    message = await interaction.channel.send(embed=embed)
+
+    try:
+        await message.add_reaction(emoji_valide)
+    except discord.HTTPException:
+        await interaction.followup.send(
+            "⚠️ Giveaway créé, mais je n'ai pas pu réagir avec cet emoji (vérifie que je peux l'utiliser).",
+            ephemeral=True,
+        )
+
+    guild_conf = config.setdefault(str(interaction.guild.id), {})
+    giveaways = guild_conf.setdefault("giveaways", {})
+    giveaways[str(message.id)] = {
+        "channel_id": interaction.channel.id,
+        "prize": prix,
+        "winners_count": gagnants,
+        "emoji": str(emoji_valide),
+        "end_at": fin.isoformat(),
+        "host_id": interaction.user.id,
+        "termine": False,
+    }
+    save_config(config)
+
+
+@giveaway_group.command(name="end", description="[Staff] Termine immédiatement un giveaway et tire les gagnants")
+@app_commands.describe(message_id="L'ID du message du giveaway à terminer")
+async def giveaway_end_cmd(interaction: discord.Interaction, message_id: str):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message("❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
+        return
+
+    guild_conf = config.setdefault(str(interaction.guild.id), {})
+    giveaways = guild_conf.setdefault("giveaways", {})
+    data = giveaways.get(message_id.strip())
+    if not data:
+        await interaction.response.send_message("❌ Giveaway introuvable (vérifie l'ID du message).", ephemeral=True)
+        return
+    if data.get("termine"):
+        await interaction.response.send_message("❌ Ce giveaway est déjà terminé.", ephemeral=True)
+        return
+
+    await interaction.response.send_message("✅ Giveaway terminé, tirage en cours...", ephemeral=True)
+    await terminer_giveaway(interaction.guild, message_id.strip(), data)
+    save_config(config)
+
+
+@giveaway_group.command(name="reroll", description="[Staff] Retire de nouveaux gagnants pour un giveaway déjà terminé")
+@app_commands.describe(message_id="L'ID du message du giveaway concerné")
+async def giveaway_reroll_cmd(interaction: discord.Interaction, message_id: str):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message("❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
+        return
+
+    guild_conf = config.get(str(interaction.guild.id), {})
+    giveaways = guild_conf.get("giveaways", {})
+    data = giveaways.get(message_id.strip())
+    if not data or not data.get("termine"):
+        await interaction.response.send_message("❌ Giveaway introuvable ou pas encore terminé.", ephemeral=True)
+        return
+
+    channel = interaction.guild.get_channel(data["channel_id"])
+    if channel is None:
+        await interaction.response.send_message("❌ Le salon d'origine est introuvable.", ephemeral=True)
+        return
+
+    try:
+        message = await channel.fetch_message(int(message_id.strip()))
+    except (discord.NotFound, discord.HTTPException):
+        await interaction.response.send_message("❌ Le message du giveaway est introuvable.", ephemeral=True)
+        return
+
+    participants = await recuperer_participants(message, data["emoji"])
+    anciens_gagnants = set(data.get("gagnants_ids", []))
+    nouveaux_candidats = [p for p in participants if p.id not in anciens_gagnants] or participants
+
+    nb_gagnants = min(data["winners_count"], len(nouveaux_candidats))
+    gagnants = random.sample(nouveaux_candidats, nb_gagnants) if nb_gagnants > 0 else []
+
+    data["gagnants_ids"] = [g.id for g in gagnants]
+    save_config(config)
+
+    await interaction.response.send_message("✅ Nouveau tirage effectué !", ephemeral=True)
+    await channel.send(embed=build_resultat_embed(f"{data['prize']} (reroll)", gagnants))
+
+
+@giveaway_group.command(name="liste", description="Affiche les giveaways actuellement en cours")
+async def giveaway_liste_cmd(interaction: discord.Interaction):
+    guild_conf = config.get(str(interaction.guild.id), {})
+    giveaways = guild_conf.get("giveaways", {})
+    en_cours = [(mid, d) for mid, d in giveaways.items() if not d.get("termine")]
+
+    if not en_cours:
+        await interaction.response.send_message("Aucun giveaway en cours actuellement.", ephemeral=True)
+        return
+
+    lignes = []
+    for message_id, data in en_cours:
+        fin = _parse_dt(data.get("end_at"))
+        lignes.append(
+            f"🎁 **{data['prize']}** — {data['winners_count']} gagnant(s) — <t:{int(fin.timestamp())}:R> "
+            f"(ID : `{message_id}`)"
+        )
+
+    embed = discord.Embed(title="🎉 Giveaways en cours", description="\n".join(lignes), color=discord.Color.fuchsia())
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+bot.tree.add_command(giveaway_group)
+
+# ================================================================
 #                          EVENTS
 # ================================================================
  
@@ -5888,6 +6180,9 @@ async def on_ready():
 
     if not check_tempbans_loop.is_running():
         check_tempbans_loop.start()
+
+     if not check_giveaways.is_running():
+        check_giveaways.start()
 
     if not rotation_statut.is_running():
         rotation_statut.start()
